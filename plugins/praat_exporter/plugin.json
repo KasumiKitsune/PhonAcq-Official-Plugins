@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.praat_exporter",
+    "name": "TextGrid 导出器",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "在音频分析模块中，将选区导出为 Praat 兼容的 .TextGrid 文件。",
+    "main_file": "exporter.py",
+    "entry_class": "PraatExporterPlugin",
+    "icon": "praat_icon.png",
+    "manual_file": "manual.md"
+}

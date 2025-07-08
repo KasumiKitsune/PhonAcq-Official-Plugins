@@ -1,0 +1,19 @@
+{
+    "local_path": "C:/Users/Sager/Desktop/新建文件夹",
+    "target_statuses": {
+        "word_lists": "disabled",
+        "visual_wordlists": "disabled",
+        "flashcards": "disabled",
+        "results": "disabled"
+    },
+    "custom_targets": [],
+    "conflict_policy": "keep_newer",
+    "id": "com.phonacq.odyssey_sync",
+    "name": "Odyssey 本地同步",
+    "version": "2.0.0-local_only",
+    "author": "PhonAcq Assistant Team",
+    "description": "将词表、录制结果等数据安全地备份（同步）到您指定的另一个本地文件夹。",
+    "main_file": "sync_plugin.py",
+    "entry_class": "SyncPlugin",
+    "icon": ""
+}

@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.batch_processor",
+    "name": "批量音频处理器",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "对音频文件进行批量格式转换、重采样和音量标准化。",
+    "main_file": "processor.py",
+    "entry_class": "BatchProcessorPlugin",
+    "icon": "processor.png",
+    "manual_file": "manual.md"
+}

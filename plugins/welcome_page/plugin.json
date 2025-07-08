@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.welcome_page",
+    "name": "欢迎与开始",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "显示PhonAcq Assistant的欢迎信息、版本和快速开始指南。",
+    "main_file": "welcome_page.py",
+    "entry_class": "WelcomePagePlugin",
+    "icon": "welcome.png",
+    "manual_file": "manual.md"
+}

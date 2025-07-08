@@ -1,0 +1,17 @@
+[
+  {
+    "id": "ipa_full",
+    "name": "通用IPA (常用)",
+    "file": "ipa_full.json"
+  },
+  {
+    "id": "english_ipa",
+    "name": "英语音标",
+    "file": "english_ipa.json"
+  },
+  {
+    "id": "mandarin_pinyin",
+    "name": "汉语普通话",
+    "file": "mandarin_pinyin.json"
+  }
+]
