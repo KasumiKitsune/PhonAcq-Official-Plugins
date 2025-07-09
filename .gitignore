@@ -207,3 +207,6 @@ marimo/_lsp/
 __marimo__/
 # Ignore local utility scripts
 Git可视化提交工具.exe
+# 忽略插件自身的配置文件
+#    (包含个人路径或敏感信息)
+config.json
