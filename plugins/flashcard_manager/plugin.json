@@ -1,0 +1,12 @@
+{
+  "id": "com.phonacq.flashcard_manager",
+  "name": "速记卡管理器",
+  "version": "1.0.0",
+  "author": "你的名字",
+  "description": "提供一个图形化界面，用于管理、预览和导入专为“速记卡”模块准备的词表。",
+  "main_file": "manager_main.py",
+  "entry_class": "FlashcardManagerPlugin",
+  "icon": "icons/flashcard_manager.png",
+  "manual_file": "manual.md",
+  "tags": ["速记卡", "管理", "效率"]
+}
