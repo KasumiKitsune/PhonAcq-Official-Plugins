@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.archive_manager",
+    "name": "档案库",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "系统化地管理实验信息、受试者背景资料，并与采集结果相关联。",
+    "main_file": "archive.py",
+    "entry_class": "ArchivePlugin",
+    "icon": "archive_icon.png",
+    "manual_file": "manual.md"
+}

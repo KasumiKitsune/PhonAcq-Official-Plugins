@@ -10,7 +10,7 @@ from itertools import cycle
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
                              QMessageBox, QTableView, QHeaderView, QComboBox, QCheckBox,
                              QSplitter, QGroupBox, QLineEdit, QFormLayout,
-                             QColorDialog, QSlider, QWidget, QScrollArea, QMenu, QFrame, QGridLayout)
+                             QColorDialog, QSlider, QWidget, QScrollArea, QMenu, QFrame, QGridLayout, QApplication)
 from PyQt5.QtCore import Qt, QAbstractTableModel, QSize, pyqtSignal
 from PyQt5.QtGui import QIcon, QColor, QPalette, QPixmap, QFont
 
@@ -173,7 +173,7 @@ class ColorButton(QLabel):
  
     def __init__(self, color=Qt.black, parent=None):
         super().__init__(parent)
-        self.setFixedSize(20, 20)
+        self.setFixedSize(50, 20)
         self.clicked = self.colorChanged
         self.set_color(QColor(color))
         self.popup = None
@@ -260,6 +260,12 @@ class PlotterDialog(QDialog):
         self.tg = None
         self.group_widgets = {}
 
+        # --- 新增：用于交互功能的状态变量 ---
+        self._is_panning = False
+        self._pan_start_pos = None
+        self.plotted_collections = []  # 存储绘图对象以便交互
+        self.hover_annotation = None   # 用于显示悬浮信息的文本对象
+ 
         self._init_ui()
         self._connect_signals()
         self._update_ui_state()
@@ -273,7 +279,12 @@ class PlotterDialog(QDialog):
         self.canvas = FigureCanvas(self.figure)
         # --- [核心修改 #1 & #2] 启用右键菜单和滚轮缩放 ---
         self.canvas.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.canvas.setToolTip("图表区域。\n- 右键可刷新/保存\n- Ctrl+滚轮可缩放")
+        self.canvas.setToolTip(
+            "图表区域。\n"
+            "- 左键拖动可平移视图\n"
+            "- 右键可打开菜单\n"
+            "- Ctrl+滚轮可缩放"
+        )
         
         self.table_view = QTableView()
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -366,9 +377,9 @@ class PlotterDialog(QDialog):
         
         self.points_group = QGroupBox("数据点样式 (全局)"); points_layout = QFormLayout(self.points_group)
         self.point_color_btn = ColorButton(QColor("#3498db"))
-        self.point_size_slider = QSlider(Qt.Horizontal); self.point_size_slider.setRange(5, 100); self.point_size_slider.setValue(30)
+        self.point_size_slider = QSlider(Qt.Horizontal); self.point_size_slider.setRange(5, 100); self.point_size_slider.setValue(15)
         self.point_size_slider.setToolTip("调整所有数据点的大小。")
-        self.point_alpha_slider = QSlider(Qt.Horizontal); self.point_alpha_slider.setRange(10, 100); self.point_alpha_slider.setValue(70)
+        self.point_alpha_slider = QSlider(Qt.Horizontal); self.point_alpha_slider.setRange(10, 100); self.point_alpha_slider.setValue(30)
         self.point_alpha_slider.setToolTip("调整所有数据点的不透明度，值越小越透明。")
         
         self.ungrouped_color_row = QWidget(); ungrouped_color_layout = QFormLayout(self.ungrouped_color_row)
@@ -428,46 +439,128 @@ class PlotterDialog(QDialog):
         self.textgrid_tier_combo.currentIndexChanged.connect(self._on_tg_mode_changed)
         # --- [核心修改 #1] 连接右键菜单信号 ---
         self.canvas.customContextMenuRequested.connect(self._show_context_menu)
+        self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
+        self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
+        self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
 
-    # --- [核心修改 #1] 右键菜单功能 ---
+
     def _show_context_menu(self, pos):
+        """显示一个功能更丰富的右键上下文菜单。"""
         context_menu = QMenu(self)
-        
-        save_action = context_menu.addAction("保存图片...")
-        if self.icon_manager: save_action.setIcon(self.icon_manager.get_icon("save"))
-            
+ 
+        # 1. 核心操作 (刷新、重置)
         refresh_action = context_menu.addAction("刷新图表")
-        if self.icon_manager: refresh_action.setIcon(self.icon_manager.get_icon("refresh"))
-
+        reset_view_action = context_menu.addAction("重置视图/缩放")
+        if self.icon_manager:
+            refresh_action.setIcon(self.icon_manager.get_icon("refresh"))
+            reset_view_action.setIcon(self.icon_manager.get_icon("zoom_selection")) # 假设有此图标
+ 
+        context_menu.addSeparator()
+ 
+        # 2. 导出操作 (保存、复制)
+        copy_action = context_menu.addAction("复制图片到剪贴板")
+        save_action = context_menu.addAction("保存图片...")
+        if self.icon_manager:
+            copy_action.setIcon(self.icon_manager.get_icon("copy"))
+            save_action.setIcon(self.icon_manager.get_icon("save"))
+            
+        context_menu.addSeparator()
+        
+        # 3. 清理操作
+        clear_action = context_menu.addAction("清空所有数据...")
+        if self.icon_manager:
+            clear_action.setIcon(self.icon_manager.get_icon("clear_contents"))
+ 
+        # 执行菜单并根据选择执行动作
         action = context_menu.exec_(self.canvas.mapToGlobal(pos))
         
-        if action == save_action:
-            self._save_plot_image()
-        elif action == refresh_action:
+        if action == refresh_action:
             self._plot_data()
-
-    def _save_plot_image(self):
-        # 1. 获取当前图表标题
-        title = self.title_edit.text()
+        elif action == reset_view_action:
+            self._reset_view()
+        elif action == copy_action:
+            self._copy_plot_to_clipboard()
+        elif action == save_action:
+            self._save_plot_image()
+        elif action == clear_action:
+            self._clear_all_data()
+ 
+    def _reset_view(self):
+        """重置坐标轴范围并重绘图表。"""
+        # 清空手动设置的范围
+        self.x_min_edit.clear()
+        self.x_max_edit.clear()
+        self.y_min_edit.clear()
+        self.y_max_edit.clear()
+        # 重新绘图，此时会使用自动范围
+        self._plot_data()
+ 
+    def _copy_plot_to_clipboard(self):
+        """将当前图表画布渲染为图片并复制到系统剪贴板。"""
+        try:
+            pixmap = self.canvas.grab()
+            QApplication.clipboard().setPixmap(pixmap)
+            # 可选：短暂的状态栏提示
+            if hasattr(self.parent(), 'statusBar'):
+               self.parent().statusBar().showMessage("图表已复制到剪贴板", 2000)
+        except Exception as e:
+            QMessageBox.critical(self, "复制失败", f"无法将图片复制到剪贴板: {e}")
+ 
+    def _clear_all_data(self):
+        """清空所有已加载的数据和图表，恢复到初始状态。"""
+        reply = QMessageBox.question(
+            self,
+            "确认清空",
+            "您确定要清空所有已加载的数据和配置吗？\n此操作不可恢复。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+ 
+        # 重置DataFrame和TextGrid
+        self.df = None
+        self.tg = None
         
-        # 2. 清理标题，使其成为一个有效的文件名
-        # 移除 Windows 和 Linux/macOS 不允许的字符
+        # 清空UI标签和模型
+        self.file_label.setText("未加载文件")
+        self.textgrid_label.setText("未加载 TextGrid")
+        self.table_view.setModel(None)
+        
+        # 清空下拉框
+        self.f1_combo.clear()
+        self.f2_combo.clear()
+        self.group_by_combo.clear()
+        self.textgrid_tier_combo.clear()
+ 
+        # 清空图表
+        self.figure.clear()
+        self.canvas.draw()
+        
+        # 清空分组设置并更新UI状态
+        self._populate_group_settings()
+        self._update_ui_state()
+ 
+    def _save_plot_image(self):
+        """保存图表为图片文件（保留原功能）。"""
+        title = self.title_edit.text()
         safe_filename = re.sub(r'[\\/*?:"<>|]', "_", title)
         
-        # 3. 弹出保存对话框，并设置默认文件名
         file_path, _ = QFileDialog.getSaveFileName(
             self, 
             "保存图片", 
-            f"{safe_filename}.png",  # 设置默认文件名
-            "PNG图片 (*.png);;高分辨率PDF (*.pdf);;JPEG图片 (*.jpg)"
+            f"{safe_filename}.png",
+            "PNG图片 (*.png);;高分辨率PDF (*.pdf);;JPEG图片 (*.jpg);;SVG矢量图 (*.svg)"
         )
  
         if file_path:
             try:
-                self.figure.savefig(file_path, dpi=300, bbox_inches='tight')
+                # 增加背景色为白色，避免保存透明背景
+                self.figure.savefig(file_path, dpi=300, bbox_inches='tight', facecolor='white')
                 QMessageBox.information(self, "成功", f"图表已保存到:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "保存失败", f"无法保存图片: {e}")
+
 
     # --- [核心修改 #2] 滚轮缩放功能 ---
     def wheelEvent(self, event):
@@ -627,27 +720,35 @@ class PlotterDialog(QDialog):
         f1_col, f2_col, group_col = self.f1_combo.currentText(), self.f2_combo.currentText(), self.group_by_combo.currentText()
         if not f1_col or not f2_col: return
         try:
-            self.figure.clear(); ax = self.figure.add_subplot(111)
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+            
+            # --- 新增：重置交互状态 ---
+            self.plotted_collections.clear()
+            self.hover_annotation = None
             
             point_size = self.point_size_slider.value()
             point_alpha = self.point_alpha_slider.value() / 100.0
-
+ 
             has_visible_groups = False
             if group_col != "无分组" and self.group_widgets:
-                plot_df = self.df.dropna(subset=[f1_col, f2_col, group_col])
+                plot_df_base = self.df.dropna(subset=[f1_col, f2_col, group_col])
                 for group_name, widgets in self.group_widgets.items():
                     if not widgets['cb'].isChecked(): continue
                     has_visible_groups = True
-                    group_data = plot_df[plot_df[group_col].astype(str) == str(group_name)]
+                    group_data = plot_df_base[plot_df_base[group_col].astype(str) == str(group_name)]
                     f1, f2 = group_data[f1_col], group_data[f2_col]
                     if f1.empty: continue
                     color = widgets['color'].color().name()
                     marker = self.MARKER_STYLES[widgets['marker'].currentText()]
                     
-                    ax.scatter(f2, f1, label=group_name, color=color, marker=marker, 
-                               s=point_size, alpha=point_alpha)
-
+                    # --- 修改：存储绘图对象 ---
+                    collection = ax.scatter(f2, f1, label=group_name, color=color, marker=marker, 
+                                            s=point_size, alpha=point_alpha, picker=True)
+                    self.plotted_collections.append({'collection': collection, 'label': group_name, 'data': group_data[[f1_col, f2_col]]})
+ 
                     if self.mean_group.isChecked():
+                        # (平均值点的代码保持不变) ...
                         mean_f1, mean_f2 = f1.mean(), f2.mean()
                         unfilled_markers = ['+', 'x', '|', '_']
                         current_marker_char = self.MARKER_STYLES[self.mean_marker_combo.currentText()]
@@ -655,15 +756,25 @@ class PlotterDialog(QDialog):
                         if current_marker_char not in unfilled_markers:
                             scatter_kwargs['edgecolors'] = 'white'; scatter_kwargs['linewidths'] = 1.5
                         ax.scatter(mean_f2, mean_f1, **scatter_kwargs)
-
+ 
                     if self.ellipse_group.isChecked() and len(f1) > 2:
                         self._plot_ellipse(f2, f1, ax, color)
             else:
                 plot_df = self.df[[f1_col, f2_col]].copy().dropna()
                 f1, f2 = plot_df[f1_col], plot_df[f2_col]
-                ax.scatter(f2, f1, color=self.point_color_btn.color().name(), 
-                           s=point_size, alpha=point_alpha)
-
+                
+                # --- 修改：存储绘图对象 (无分组时) ---
+                collection = ax.scatter(f2, f1, color=self.point_color_btn.color().name(), 
+                                        s=point_size, alpha=point_alpha, picker=True)
+                self.plotted_collections.append({'collection': collection, 'label': '数据点', 'data': plot_df})
+ 
+            # --- 新增：创建悬浮提示文本框 ---
+            self.hover_annotation = ax.text(0.98, 0.98, '', transform=ax.transAxes,
+                                            ha='right', va='top', fontsize=9,
+                                            bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.9))
+            self.hover_annotation.set_visible(False)
+ 
+            # (坐标轴和标题设置代码保持不变)
             ax.set_title(self.title_edit.text(), fontsize=14); ax.set_xlabel(self.xlabel_edit.text()); ax.set_ylabel(self.ylabel_edit.text())
             ax.grid(True, linestyle='--', alpha=0.6)
             try:
@@ -676,7 +787,75 @@ class PlotterDialog(QDialog):
                 ax.legend()
             self.figure.tight_layout(pad=1.5); self.canvas.draw()
         except Exception as e: QMessageBox.critical(self, "绘图失败", f"生成图表时发生错误: {e}\n\n请检查数据列是否正确。")
-    
+        
+    def _on_mouse_press(self, event):
+        """处理鼠标按下事件，用于开始平移。"""
+        # 只在坐标轴内且使用左键时触发
+        if event.inaxes and event.button == 1:
+            self._is_panning = True
+            self._pan_start_pos = (event.xdata, event.ydata)
+            self.canvas.setCursor(Qt.ClosedHandCursor)
+ 
+    def _on_mouse_release(self, event):
+        """处理鼠标释放事件，结束平移。"""
+        if self._is_panning:
+            self._is_panning = False
+            self.canvas.setCursor(Qt.ArrowCursor)
+ 
+    def _on_mouse_move(self, event):
+        """处理鼠标移动事件，用于平移或悬浮提示。"""
+        if not event.inaxes:
+            # 如果鼠标移出坐标轴，隐藏悬浮提示
+            if self.hover_annotation and self.hover_annotation.get_visible():
+                self.hover_annotation.set_visible(False)
+                self.canvas.draw_idle()
+            return
+        
+        # --- 拖动视图逻辑 ---
+        if self._is_panning:
+            ax = event.inaxes
+            if self._pan_start_pos is None: return
+            
+            dx = event.xdata - self._pan_start_pos[0]
+            dy = event.ydata - self._pan_start_pos[1]
+            
+            cur_xlim = ax.get_xlim()
+            cur_ylim = ax.get_ylim()
+            
+            ax.set_xlim(cur_xlim[0] - dx, cur_xlim[1] - dx)
+            ax.set_ylim(cur_ylim[0] - dy, cur_ylim[1] - dy)
+            self.canvas.draw_idle()
+            return # 拖动时不进行悬浮检测
+            
+        # --- 悬浮提示逻辑 ---
+        if self.hover_annotation is None: return
+ 
+        f1_col, f2_col = self.f1_combo.currentText(), self.f2_combo.currentText()
+        found_point = False
+        
+        for plot_item in self.plotted_collections:
+            collection = plot_item['collection']
+            contains, ind = collection.contains(event)
+            if contains:
+                # 获取被悬浮点的数据
+                data_index = ind['ind'][0]
+                point_data = plot_item['data'].iloc[data_index]
+                x_val, y_val = point_data[f2_col], point_data[f1_col]
+ 
+                # 更新悬浮文本
+                label = plot_item['label']
+                text = f"{label}\nF2: {x_val:.1f} Hz\nF1: {y_val:.1f} Hz"
+                self.hover_annotation.set_text(text)
+                self.hover_annotation.set_visible(True)
+                self.canvas.draw_idle()
+                found_point = True
+                break # 找到一个点就停止
+        
+        # 如果没有找到点，且之前是可见的，则隐藏
+        if not found_point and self.hover_annotation.get_visible():
+            self.hover_annotation.set_visible(False)
+            self.canvas.draw_idle()
+
     def _on_grouping_changed(self):
         group_col = self.group_by_combo.currentText()
         if self.df is not None and group_col != "无分组":
