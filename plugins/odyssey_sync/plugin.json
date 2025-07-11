@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.odyssey_sync",
+    "name": "Odyssey 同步",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "将词表、录制结果等数据同步到本地文件夹。",
+    "main_file": "sync_plugin.py",
+    "entry_class": "SyncPlugin",
+    "icon": "sync.png",
+    "manual_file": "manual.md"
+}

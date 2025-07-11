@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.ipa_keyboard",
+    "name": "IPA 符号键盘",
+    "version": "1.1.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "提供一个可搜索、可筛选的IPA符号虚拟键盘，方便用户快速输入音标。",
+    "main_file": "keyboard.py",
+    "entry_class": "IpaKeyboardPlugin",
+    "icon": "keyboard_icon.png" ,
+    "manual_file": "manual.md"
+}
