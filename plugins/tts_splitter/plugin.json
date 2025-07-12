@@ -1,0 +1,12 @@
+{
+  "id": "com.phonacq.tts_splitter",
+  "name": "TTS 分割器",
+  "version": "1.0.0",
+  "author": "PhonAcq Assistant Team",
+  "description": "根据词表，将包含多个词语的长音频自动分割成独立的、已命名的音频文件。",
+  "main_file": "splitter_main.py",
+  "entry_class": "TtsSplitterPlugin",
+  "icon": "split.png",
+  "manual_file": "manual.md",
+  "tags": ["TTS", "分割", "自动化", "效率"]
+}
