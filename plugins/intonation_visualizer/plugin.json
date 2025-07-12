@@ -1,0 +1,12 @@
+{
+    "id": "com.phonacq.intonation_visualizer",
+    "name": "语调可视化与建模",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "对F0基频曲线进行可视化、归一化（半音/Z-Score）和平滑处理，用于声调和语调分析。",
+    "main_file": "visualizer.py",
+    "entry_class": "IntonationVisualizerPlugin",
+    "icon": "intonation.png",
+    "tags": ["声调", "语调", "可视化", "F0", "分析"],
+    "manual_file": "manual.md"
+}
