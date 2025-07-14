@@ -71,32 +71,26 @@ class AnnotationWorkbenchDialog(QDialog):
     def __init__(self, audio_filepath, total_duration, sr, icon_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("TextGrid 标注工作台")
-        self.setMinimumSize(600, 700)
+        self.setMinimumSize(600, 700) # 保持最小尺寸
 
-        # --- 核心数据 ---
+        # --- 核心数据 (不变) ---
         self.audio_filepath = audio_filepath
         self.total_duration = total_duration
         self.sr = sr
         self.icon_manager = icon_manager
-        self.current_selection = None # (start_sec, end_sec)
-        self.annotations = {}  # {group_name: [(start, end, text), ...]}
-
-        # --- 预设颜色 ---
+        self.current_selection = None
+        self.annotations = {}
         self.color_cycle = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         self.group_colors = {}
 
         self._init_ui()
         self._connect_signals()
         
-        # --- [核心修改] 新增：设置删除动作和快捷键 ---
+        # --- 删除动作和快捷键 (不变) ---
         self.delete_action = QAction("删除选中的标注", self)
-        self.delete_action.setShortcut(QKeySequence.Delete) # 绑定 Delete 键
-        # 为了兼容macOS等可能没有独立Delete键的系统，可以额外绑定 Backspace
-        self.delete_action.setShortcuts([QKeySequence.Delete, Qt.Key_Backspace]) 
+        self.delete_action.setShortcuts([QKeySequence.Delete, Qt.Key_Backspace])
         self.delete_action.triggered.connect(self._delete_selected_annotations)
-        # 将这个 Action 添加到标注列表控件上，这样只有当列表获得焦点时快捷键才生效
         self.annotation_list.addAction(self.delete_action)
-        # --- 修改结束 ---
 
         self._update_ui_state()
         
@@ -104,70 +98,73 @@ class AnnotationWorkbenchDialog(QDialog):
         main_layout = QVBoxLayout(self)
         
         info_label = QLabel(f"<b>文件:</b> {os.path.basename(self.audio_filepath)} | <b>总时长:</b> {self.total_duration:.3f}s")
-        main_layout.addWidget(info_label)
+        main_layout.addWidget(info_label) # 添加信息标签，伸展因子为0 (默认)
 
         splitter = QSplitter(Qt.Horizontal)
         left_panel = self._create_left_panel()
         right_panel = self._create_right_panel()
 
-        splitter.addWidget(left_panel); splitter.addWidget(right_panel)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
         splitter.setSizes([250, 350])
-        main_layout.addWidget(splitter)
         
+        # --- 核心修改: 为 splitter 设置伸展因子 ---
+        # 这将确保当窗口垂直拉伸时，所有多余的空间都分配给 splitter
+        main_layout.addWidget(splitter, 1) 
+        # --- 修改结束 ---
+
         bottom_layout = QHBoxLayout()
         self.import_button = QPushButton(" 导入现有 TextGrid...")
-        # [修复] 修正 get_icon 调用
         self.import_button.setIcon(self.icon_manager.get_icon("open_folder"))
         self.export_button = QPushButton(" 导出到 TextGrid...")
         self.export_button.setIcon(self.icon_manager.get_icon("save"))
         bottom_layout.addStretch()
         bottom_layout.addWidget(self.import_button)
         bottom_layout.addWidget(self.export_button)
-        main_layout.addLayout(bottom_layout)
+        main_layout.addLayout(bottom_layout) # 添加底部按钮，伸展因子为0 (默认)
 
     def _create_left_panel(self):
-        panel = QWidget(); layout = QVBoxLayout(panel)
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 5, 0)
 
         group_box = QGroupBox("分组 (对应 Tier)")
-        group_layout = QVBoxLayout(group_box)
-        self.group_list = QListWidget(); self.group_list.setToolTip("当前的分组列表。选择一个分组以在该组中添加标注。")
+        # --- 布局健壮性优化 ---
+        group_layout = QVBoxLayout() # 先创建布局
+        group_box.setLayout(group_layout) # 再设置给GroupBox
+        # --- 优化结束 ---
+        
+        self.group_list = QListWidget()
+        self.group_list.setToolTip("当前的分组列表。选择一个分组以在该组中添加标注。")
         
         group_btn_layout = QHBoxLayout()
-        # [优化] 设置按钮间的间距
         group_btn_layout.setSpacing(5)
 
-        # --- [核心修改] 为按钮添加文本 ---
-        # 1. 修改 "添加分组" 按钮
-        self.add_group_btn = QPushButton(" 添加分组") # 直接在构造函数中加入文本
+        self.add_group_btn = QPushButton(" 添加分组")
         self.add_group_btn.setIcon(self.icon_manager.get_icon("add_row"))
-        # self.add_group_btn.setIconSize(QSize(16, 16)) # 移除固定的IconSize，让它自适应按钮大小
         self.add_group_btn.setToolTip("添加新分组 (快捷键: Ctrl+N)")
         self.add_group_btn.setAutoDefault(False)
         self.add_group_btn.setShortcut("Ctrl+N")
         
-        # 2. 修改 "删除分组" 按钮
-        self.remove_group_btn = QPushButton(" 删除分组") # 直接在构造函数中加入文本
+        self.remove_group_btn = QPushButton(" 删除分组")
         self.remove_group_btn.setIcon(self.icon_manager.get_icon("remove_row")) 
-        # self.remove_group_btn.setIconSize(QSize(16, 16)) # 移除固定的IconSize
         self.remove_group_btn.setToolTip("删除选中分组及其所有标注")
         self.remove_group_btn.setAutoDefault(False)
-        # --- 修改结束 ---
-        
-        # 3. （可选）调整按钮样式，让图标和文字看起来更协调
-        # from PyQt5.QtCore import Qt
-        # self.add_group_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        # self.remove_group_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
 
         group_btn_layout.addWidget(self.add_group_btn)
         group_btn_layout.addWidget(self.remove_group_btn)
         group_btn_layout.addStretch()
+        
         group_layout.addWidget(self.group_list)
         group_layout.addLayout(group_btn_layout)
 
         # 标注控制
         annotate_box = QGroupBox("添加新标注")
-        annotate_layout = QFormLayout(annotate_box)
+        # --- 布局健壮性优化 ---
+        annotate_layout = QFormLayout()
+        annotate_box.setLayout(annotate_layout)
+        # --- 优化结束 ---
+
         self.selection_label = QLabel("<i>请在主窗口选择区域...</i>")
         self.selection_label.setStyleSheet("color: gray;")
         self.annotation_text = QLineEdit()
@@ -175,25 +172,31 @@ class AnnotationWorkbenchDialog(QDialog):
         self.add_annotation_btn = QPushButton(" 添加标注到选中分组")
         self.add_annotation_btn.setIcon(self.icon_manager.get_icon("add"))
         
-        # --- [核心修改 3] ---
-        self.add_annotation_btn.setAutoDefault(True) # 明确将此按钮设为可成为默认
-        self.add_annotation_btn.setDefault(True)     # 强制将此按钮设为当前的默认按钮
-        # --- 修改结束 ---
+        self.add_annotation_btn.setAutoDefault(True)
+        self.add_annotation_btn.setDefault(True)
         
         annotate_layout.addRow("当前选区:", self.selection_label)
         annotate_layout.addRow("标注文本:", self.annotation_text)
         annotate_layout.addRow(self.add_annotation_btn)
         
-        layout.addWidget(group_box, 1)
-        layout.addWidget(annotate_box)
+        # --- 核心修改: 使用伸展因子 ---
+        layout.addWidget(group_box, 1) # 让分组框占据大部分空间
+        layout.addWidget(annotate_box) # 添加标注框占据固定空间
+        # --- 修改结束 ---
+
         return panel
     
     def _create_right_panel(self):
-        panel = QWidget(); layout = QVBoxLayout(panel)
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
         layout.setContentsMargins(5, 0, 0, 0)
         box = QGroupBox("已添加的标注")
-        box_layout = QVBoxLayout(box)
-        self.annotation_list = QListWidget(); self.annotation_list.setToolTip("双击可编辑标注文本，按Delete键可删除。")
+        # --- 布局健壮性优化 ---
+        box_layout = QVBoxLayout()
+        box.setLayout(box_layout)
+        # --- 优化结束 ---
+        self.annotation_list = QListWidget()
+        self.annotation_list.setToolTip("双击可编辑标注文本，按Delete键可删除。")
         box_layout.addWidget(self.annotation_list, 1)
         layout.addWidget(box)
         return panel

@@ -7,6 +7,6 @@
   "main_file": "plotter.py",
   "entry_class": "VowelSpacePlotterPlugin",
   "tags": ["分析", "可视化", "元音", "声学"],
-  "icon": "icons/plotter_icon.png",
+  "icon": "plotter_icon.png",
   "manual_file": "manual.md"
 }

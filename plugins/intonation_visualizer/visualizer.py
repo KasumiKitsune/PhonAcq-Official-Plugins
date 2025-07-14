@@ -145,7 +145,7 @@ class VisualizerDialog(QDialog):
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(0, self.reject); return
 
-        self.setWindowTitle("语调可视化与建模 V2.1")
+        self.setWindowTitle("语调可视化")
         self.resize(1400, 900)
         self.setMinimumSize(1200, 750)
         self.icon_manager = icon_manager

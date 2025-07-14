@@ -206,22 +206,23 @@ class IpaKeyboardDialog(QDialog):
         right_layout.setContentsMargins(5, 5, 5, 5)
         right_layout.setSpacing(10)
 
-        symbol_box = QGroupBox("符号键盘")
-        symbol_box_layout = QVBoxLayout(symbol_box)
+        symbol_title_label = QLabel("符号键盘")
+        symbol_title_label.setStyleSheet("font-weight: bold; margin-bottom: 5px;") # 模仿 GroupBox 标题样式
+ 
         self.symbol_scroll_area = QScrollArea()
         self.symbol_scroll_area.setWidgetResizable(True)
+        # 我们可以保留或添加一个细边框，以在视觉上进行区分
         self.symbol_scroll_area.setFrameShape(QFrame.NoFrame)
         
         self.button_container = QWidget()
         self.symbol_flow_layout = FlowLayout(self.button_container, margin=5, h_spacing=5, v_spacing=5)
         self.symbol_scroll_area.setWidget(self.button_container)
-        symbol_box_layout.addWidget(self.symbol_scroll_area)
         
         output_group = QGroupBox("文本暂存区")
         output_layout = QHBoxLayout(output_group)
         self.output_text = QPlainTextEdit()
         self.output_text.setPlaceholderText("点击上方符号可在此处编辑...")
-        self.output_text.setFont(QFont("Doulos SIL", 12))
+        self.output_text.setFont(QFont("Doulos SIL", 16))
         self.copy_button = QPushButton("复制")
         self.clear_button = QPushButton("清空")
         output_btn_layout = QVBoxLayout()
@@ -231,7 +232,8 @@ class IpaKeyboardDialog(QDialog):
         output_layout.addWidget(self.output_text, 1)
         output_layout.addLayout(output_btn_layout)
         
-        right_layout.addWidget(symbol_box, 1)
+        right_layout.addWidget(symbol_title_label)
+        right_layout.addWidget(self.symbol_scroll_area, 1) # 将拉伸因子直接赋给滚动区域
         right_layout.addWidget(output_group)
 
         # --- 组合主布局 ---
@@ -375,7 +377,7 @@ class IpaKeyboardDialog(QDialog):
         """辅助函数，用于创建单个符号按钮。"""
         btn = QPushButton(symbol_info['symbol'])
         btn.setFixedSize(80, 45)
-        btn.setFont(QFont("Doulos SIL", 16))
+        btn.setStyleSheet("QPushButton { font-family: 'Doulos SIL'; font-size: 24px; }")
         tooltip_text = f"<b>{symbol_info['name']}</b><br>特征: {', '.join(symbol_info.get('features', []))}"
         btn.setToolTip(tooltip_text)
         btn.clicked.connect(lambda ch, s=symbol_info['symbol']: self.on_symbol_clicked(s))
