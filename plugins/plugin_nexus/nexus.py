@@ -9,8 +9,8 @@ import tempfile
 
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QTextBrowser, QSplitter,
-                             QMessageBox, QProgressBar, QWidget)
-from PyQt5.QtCore import Qt, QObject, QThread, pyqtSignal
+                             QMessageBox, QProgressBar, QWidget, QApplication)
+from PyQt5.QtCore import Qt, QObject, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
 
 try:
@@ -85,9 +85,14 @@ class NexusDialog(QDialog):
         self.setWindowTitle("插件市场 (Nexus)")
         self.resize(900, 600)
         self.setMinimumSize(800, 500)
+        
         self._init_ui()
         self._connect_signals()
-        self.fetch_plugin_index()
+        
+        # [核心修改]
+        # 不再直接调用阻塞的网络请求，而是使用QTimer在UI显示后异步触发。
+        # 这确保了对话框能够立即响应并显示。
+        QTimer.singleShot(0, self.fetch_plugin_index)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self); splitter = QSplitter(Qt.Horizontal)
@@ -132,21 +137,44 @@ class NexusDialog(QDialog):
                     continue
 
     def fetch_plugin_index(self):
+        """
+        [v3.1 重构] 异步获取插件列表，并在过程中更新UI状态。
+        """
         if not REQUESTS_AVAILABLE:
-            QMessageBox.critical(self, "依赖缺失", "无法获取在线列表，'requests' 库未安装。\n请运行: pip install requests"); return
+            QMessageBox.critical(self, "依赖缺失", "无法获取在线列表，'requests' 库未安装。\n请运行: pip install requests")
+            self.plugin_list.clear()
+            self.plugin_list.addItem("错误: 缺少 'requests' 库")
+            return
         
+        # 1. 设置UI为加载状态
         self.set_ui_enabled(False, "正在获取插件列表...")
+        self.plugin_list.clear()
+        loading_item = QListWidgetItem("正在从服务器获取插件列表...")
+        loading_item.setTextAlignment(Qt.AlignCenter)
+        self.plugin_list.addItem(loading_item)
+        QApplication.processEvents() # 强制UI更新
+
+        # 2. 加载本地已安装插件信息
         self.load_installed_plugins()
         
+        # 3. 执行网络请求
         try:
             response = requests.get(PLUGIN_INDEX_URL, timeout=10)
             response.raise_for_status()
             self.online_plugins = response.json()
+            # 成功后，调用 filter_plugin_list 填充真实数据
             self.filter_plugin_list()
-            self.set_ui_enabled(True)
         except Exception as e:
-            self.set_ui_enabled(True, "获取列表失败")
+            # 失败后，更新提示信息
+            self.plugin_list.clear()
+            error_item = QListWidgetItem("获取列表失败，请检查网络连接。")
+            error_item.setTextAlignment(Qt.AlignCenter)
+            error_item.setForeground(Qt.red)
+            self.plugin_list.addItem(error_item)
             QMessageBox.critical(self, "网络错误", f"无法从源获取插件列表:\n{e}")
+        finally:
+            # 4. 无论成功与否，最后都恢复UI的可用性
+            self.set_ui_enabled(True)
 
     def filter_plugin_list(self):
         self.plugin_list.clear()

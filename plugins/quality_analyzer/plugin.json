@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.quality_analyzer",
+    "name": "实时语音质量分析",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "在录音完成后自动分析音质，对音量过高/过低、信噪比低、削波等问题进行实时图标警告。",
+    "main_file": "launcher.py",
+    "entry_class": "QualityAnalyzerPlugin",
+    "icon": "icons/analyzer.png",
+    "manual_file": "manual.md"
+}

@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.external_tool_launcher",
+    "name": "外部工具启动器",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "允许从音频管理器中自定义用来打开音频文件的外部工具（如Praat）。",
+    "main_file": "launcher.py",
+    "entry_class": "ExternalToolLauncherPlugin",
+    "icon": "share.png",
+    "manual_file": "manual.md"
+}
