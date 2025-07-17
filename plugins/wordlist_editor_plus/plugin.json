@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.wordlist_editor_plus",
+    "name": "词表编辑器 Plus",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "一个功能强大的词表编辑器，支持元数据编辑，并为图文词表提供拖拽式图片管理功能。",
+    "main_file": "editor_plus.py",
+    "entry_class": "EditorPlusPlugin",
+    "icon": "editorplus.png",
+    "manual_file": "manual.md"
+}
