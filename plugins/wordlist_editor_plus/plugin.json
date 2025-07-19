@@ -7,5 +7,6 @@
     "main_file": "editor_plus.py",
     "entry_class": "EditorPlusPlugin",
     "icon": "editorplus.png",
-    "manual_file": "manual.md"
+    "manual_file": "manual.md",
+    "tags": ["词表", "管理", "效率"]
 }

@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLa
                              QMessageBox, QInputDialog, QFileDialog, QGroupBox, QWidget,
                              QStackedWidget, QComboBox, QMenu, QTableWidget, QTableWidgetItem,
                              QHeaderView, QAbstractItemView, QFrame, QScrollArea, QTabWidget, QDialogButtonBox,
-                             QTreeWidget, QTreeWidgetItem, QGridLayout)
+                             QTreeWidget, QTreeWidgetItem, QGridLayout, QCheckBox)
 from PyQt5.QtCore import Qt, QSize, QEvent
 from PyQt5.QtGui import QIcon
 
@@ -121,6 +121,16 @@ class ArchiveConfigManager:
             }
             self._save_config(config)
         return config
+        if "archive_mode_enabled" not in config:
+            config["archive_mode_enabled"] = False # 默认不开启
+            
+        return config
+
+    def is_archive_mode_enabled(self):
+        return self.config.get("archive_mode_enabled", False)
+        
+    def set_archive_mode_enabled(self, enabled):
+        self.config["archive_mode_enabled"] = enabled
 
     def _save_config(self, config_data):
         try:
@@ -499,14 +509,29 @@ class ArchiveSettingsDialog(QDialog):
         main_layout.addWidget(self.global_button_box); self._load_settings()
 
     def _create_general_tab(self):
-        widget = QWidget(); layout = QFormLayout(widget)
+        widget = QWidget()
+        layout = QFormLayout(widget)
+        
+        # 根目录设置 (不变)
         self.root_path_edit = QLineEdit(); self.root_path_edit.setReadOnly(True)
         browse_btn = QPushButton("浏览..."); browse_btn.clicked.connect(self._browse_root_path)
         path_layout = QHBoxLayout(); path_layout.addWidget(self.root_path_edit); path_layout.addWidget(browse_btn)
         layout.addRow("档案库根目录:", path_layout)
+
+        # [新增] 归档模式复选框
+        self.archive_mode_check = QCheckBox("启用归档模式")
+        self.archive_mode_check.setToolTip(
+            "启用后，“关联会话”将优先打开同步插件设置的备份目录。\n"
+            "这适用于将本地处理完的数据删除，但希望从备份中归档的场景。\n"
+            "需要“Odyssey Sync”插件已启用并正确配置。"
+        )
+        layout.addRow("工作流设置:", self.archive_mode_check)
+        
+        # 回收站入口 (不变)
         self.recycle_bin_btn = QPushButton("打开回收站..."); self.recycle_bin_btn.setIcon(self.parent_dialog.icon_manager.get_icon("delete"))
         self.recycle_bin_btn.clicked.connect(self._open_recycle_bin_from_settings)
         layout.addRow("数据管理:", self.recycle_bin_btn)
+
         return widget
 
     def _create_schema_tab(self):
@@ -586,6 +611,7 @@ class ArchiveSettingsDialog(QDialog):
         
     def _load_settings(self):
         self.root_path_edit.setText(self.config_manager.get_archive_root())
+        self.archive_mode_check.setChecked(self.config_manager.is_archive_mode_enabled())
         self.template_selector_combo.blockSignals(True)
         self.template_selector_combo.clear(); self.template_selector_combo.addItems(self.config_manager.get_template_names())
         self.template_selector_combo.blockSignals(False)
@@ -617,6 +643,7 @@ class ArchiveSettingsDialog(QDialog):
             self.config_manager.save_template_schema(current_template, new_schema)
         new_root = self.root_path_edit.text();
         if new_root != self.config_manager.get_archive_root(): self.config_manager.set_archive_root(new_root); self.parent_dialog.on_settings_changed()
+        self.config_manager.set_archive_mode_enabled(self.archive_mode_check.isChecked())
         self.config_manager.save()
         self.parent_dialog.on_participant_schema_changed()
         self.accept()
@@ -940,62 +967,61 @@ class ArchiveDialog(QDialog):
         return table
 
     def _format_date_input(self, widget):
-        """自动格式化并进行合理性校验的日期输入框，用户只需输入数字。"""
+        """自动格式化并进行合理性校验的日期输入框，用户只需输入数字。 (v2.0 健壮版)"""
+        # 1. 禁用信号，防止无限递归
         widget.blockSignals(True)
     
-        original_text = widget.text()
-        cursor_pos = widget.cursorPosition()
+        # 2. 获取旧的状态
+        old_text = widget.text()
+        old_cursor_pos = widget.cursorPosition()
     
-        # 清理文本，只保留数字，并限制长度为8
-        clean_text = ''.join(filter(str.isdigit, original_text))[:8]
+        # 3. 清理文本，只保留数字，并限制长度为8
+        clean_text = ''.join(filter(str.isdigit, old_text))[:8]
     
-        # [核心修改] 合理性检测与自动补零
-        year, month, day = "", "", ""
-        if len(clean_text) > 0:
-            year = clean_text[:4]
-    
-        if len(clean_text) > 4:
-            # 月份处理
-            m_part = clean_text[4:6]
-            if len(m_part) == 1 and int(m_part) > 1: # 如果月份第一位是2-9，自动补0
-                m_part = "0" + m_part
-            elif len(m_part) == 2:
-                m_int = int(m_part)
-                if m_int == 0: m_part = "01"
-                elif m_int > 12: m_part = "12"
-            month = m_part
-    
-        if len(clean_text) > 6:
-            # 日期处理
-            d_part = clean_text[6:8]
-            if len(d_part) == 1 and int(d_part) > 3: # 如果日期第一位是4-9，自动补0
-                d_part = "0" + d_part
-            elif len(d_part) == 2:
-                d_int = int(d_part)
-                if d_int == 0: d_part = "01"
-                elif d_int > 31: d_part = "31"
-            day = d_part
-    
-        # 重新组合格式化的文本
+        # 4. [核心重构] 根据纯数字长度构建格式化文本
         parts = []
-        if year: parts.append(year)
-        if month: parts.append(month)
-        if day: parts.append(day)
+        # 年
+        if len(clean_text) > 0:
+            parts.append(clean_text[:4])
+        # 月
+        if len(clean_text) > 4:
+            month_str = clean_text[4:6]
+            # 合理性校验：确保月份在 01-12 之间
+            if len(month_str) == 2:
+                month_int = int(month_str)
+                if month_int == 0: month_str = "01"
+                elif month_int > 12: month_str = "12"
+            parts.append(month_str)
+        # 日
+        if len(clean_text) > 6:
+            day_str = clean_text[6:8]
+            # 合理性校验：确保日期在 01-31 之间
+            if len(day_str) == 2:
+                day_int = int(day_str)
+                if day_int == 0: day_str = "01"
+                elif day_int > 31: day_str = "31"
+            parts.append(day_str)
+        
+        formatted_text = "-".join(parts)
     
-        # 根据组合后的部分重新插入连字符
-        if len(parts) > 1:
-            formatted_text = "-".join(parts)
-        else:
-            formatted_text = "".join(parts)
-        
+        # 5. 设置新文本
         widget.setText(formatted_text)
-
-        # 简单的光标位置恢复逻辑
-        if len(original_text) < len(formatted_text) and (cursor_pos == 4 or cursor_pos == 7):
-            widget.setCursorPosition(cursor_pos + 1)
-        else:
-            widget.setCursorPosition(cursor_pos)
+    
+        # 6. [核心重构] 精确计算新光标位置
+        # 计算文本长度的变化量
+        len_diff = len(formatted_text) - len(old_text)
+        new_cursor_pos = old_cursor_pos + len_diff
+    
+        # 特殊情况处理：当在 "2025" 后输入数字时，光标应该跳过新加的 "-"
+        if old_cursor_pos == 4 and len_diff > 0:
+            new_cursor_pos += 1
+        # 当在 "2025-07" 后输入数字时，光标应该跳过新加的 "-"
+        elif old_cursor_pos == 7 and len_diff > 0:
+            new_cursor_pos += 1
         
+        widget.setCursorPosition(max(0, new_cursor_pos))
+
+        # 7. 恢复信号
         widget.blockSignals(False)
 
     def _create_experiment_form(self):
@@ -1631,12 +1657,33 @@ class ArchiveDialog(QDialog):
                 QMessageBox.critical(self, "错误", f"创建失败: {error}")
 
     def on_add_session(self):
-        res_dir = self.main_window.config.get('file_settings',{}).get('results_dir', self.data_manager.root_path)
-        directory = QFileDialog.getExistingDirectory(self, "选择要关联的数据文件夹", res_dir);
+        """为受试者关联数据会话文件夹，并根据归档模式智能选择目录。"""
+        # 默认打开主程序配置的结果目录
+        default_open_dir = self.main_window.config.get('file_settings',{}).get('results_dir', self.data_manager.root_path)
+        
+        # 检查是否启用了归档模式
+        if self.config_manager.is_archive_mode_enabled():
+            # 检查同步插件是否存在且已激活
+            sync_plugin = self.main_window.plugin_manager.active_plugins.get('com.phonacq.odyssey_sync')
+            if sync_plugin:
+                # 调用同步插件的API获取备份路径
+                sync_results_path = sync_plugin.get_sync_results_path()
+                if sync_results_path and os.path.isdir(sync_results_path):
+                    default_open_dir = sync_results_path # 如果有效，则覆盖默认路径
+                    print(f"[Archive Plugin] 检测到归档模式，将从同步目录打开: {default_open_dir}")
+                else:
+                    print("[Archive Plugin] 归档模式已启用，但同步插件未配置有效备份路径。")
+        
+        # 使用最终确定的路径打开文件对话框
+        directory = QFileDialog.getExistingDirectory(self, "选择要关联的数据文件夹", default_open_dir)
+        
         if directory:
-            success, error = self.data_manager.add_session_to_participant(self.current_experiment, self.current_participant_id, directory);
-            if success: self.load_session_list(self.current_experiment, self.current_participant_id); self._update_dashboard(lazy=True)
-            else: QMessageBox.warning(self, "关联失败", error)
+            success, error = self.data_manager.add_session_to_participant(self.current_experiment, self.current_participant_id, directory)
+            if success:
+                self.load_session_list(self.current_experiment, self.current_participant_id)
+                self._update_dashboard(lazy=True)
+            else:
+                QMessageBox.warning(self, "关联失败", error)
 
     def on_delete_experiment(self):
         name = self.current_selected_item_name;

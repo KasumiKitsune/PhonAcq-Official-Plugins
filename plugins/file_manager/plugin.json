@@ -1,0 +1,11 @@
+{
+    "id": "com.phonacq.file_manager",
+    "name": "项目文件管理器",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "一个轻量级的文件管理器，用于在程序内安全地管理项目文件和结果，自带回收站功能。",
+    "main_file": "file_manager.py",
+    "entry_class": "FileManagerPlugin",
+    "icon": "icons/filemanager.png",
+    "manual_file": "manual.md"
+}

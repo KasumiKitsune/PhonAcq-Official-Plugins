@@ -2,7 +2,7 @@
   "id": "com.phonacq.vowel_space_plotter",
   "name": "元音空间图绘制",
   "version": "1.0.0",
-  "author": "The Successor AI",
+  "author": "PhonAcq Assistant Team",
   "description": "从表格数据 (Excel, CSV) 中读取元音的 F1, F2 共振峰数据，并将其绘制成标准的元音空间图。",
   "main_file": "plotter.py",
   "entry_class": "VowelSpacePlotterPlugin",
