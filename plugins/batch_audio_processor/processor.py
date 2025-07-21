@@ -29,6 +29,80 @@ except ImportError:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'modules')))
     from plugin_system import BasePlugin
 
+class QuickNormalizeWorker(QObject):
+    progress = pyqtSignal(int, str)
+    finished_with_refresh_request = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, filepaths, parent_window):
+        super().__init__()
+        self.filepaths = filepaths
+        self.parent_window = parent_window
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    def run(self):
+        # 固定的处理选项 (保持不变)
+        TARGET_SR = 44100
+        OPTIONS = {
+            'convert_channels_enabled': True,
+            'resample_enabled': True, 'target_sr': TARGET_SR,
+            'normalize_enabled': True
+        }
+
+        total_files = len(self.filepaths)
+        for i, filepath in enumerate(self.filepaths):
+            if not self._is_running:
+                break
+            
+            filename = os.path.basename(filepath)
+            self.progress.emit(int((i / total_files) * 100), f"处理中 ({i+1}/{total_files}): {filename}")
+
+            try:
+                # =================== [核心修正开始] ===================
+
+                # 1. 分离基本路径和旧扩展名
+                base_path, old_ext = os.path.splitext(filepath)
+                # 2. 创建新的目标文件路径，强制使用 .wav 扩展名
+                target_filepath = base_path + ".wav"
+
+                # 读取源文件
+                data, sr = sf.read(filepath)
+                
+                # --- 标准化处理 (已移除静音裁切) ---
+                if OPTIONS['convert_channels_enabled']:
+                    if data.ndim > 1 and data.shape[1] > 1:
+                        data = np.mean(data, axis=1)
+                if OPTIONS['resample_enabled'] and sr != OPTIONS['target_sr']:
+                    num_samples = int(len(data) * OPTIONS['target_sr'] / sr)
+                    data = np.interp(np.linspace(0, len(data), num_samples), np.arange(len(data)), data)
+                    sr = OPTIONS['target_sr']
+                if OPTIONS['normalize_enabled']:
+                    current_rms = np.sqrt(np.mean(data**2))
+                    if current_rms > 1e-9:
+                        gain = 0.1 / current_rms
+                        data = np.clip(data * gain, -1.0, 1.0)
+                
+                # 3. 将处理后的数据写入新的 .wav 文件
+                sf.write(target_filepath, data, sr, format='WAV')
+
+                # 4. 如果源文件不是 WAV (意味着发生了格式转换)，则在写入成功后删除源文件
+                if old_ext.lower() != ".wav" and os.path.exists(filepath):
+                    os.remove(filepath)
+
+                # =================== [核心修正结束] ===================
+
+            except Exception as e:
+                error_msg = f"处理文件 '{filename}' 时出错: {e}"
+                print(error_msg, file=sys.stderr)
+                # self.error.emit(error_msg)
+                continue
+
+        self.progress.emit(100, "处理完成！")
+        self.finished_with_refresh_request.emit()
+
 # ==============================================================================
 # 0. 可样式化的波形预览控件 (从核心模块引入)
 # ==============================================================================
@@ -475,3 +549,77 @@ class BatchProcessorPlugin(BasePlugin):
     def on_dialog_finished(self):
         if self.dialog_instance: self.dialog_instance._cleanup_temp_folder()
         self.dialog_instance = None
+
+    # [新增] 插件的新功能入口
+    def execute_quick_normalize(self, filepaths):
+        """
+        执行一个无UI的、快速的、覆盖式的标准化流程。
+        """
+        if not filepaths:
+            return
+
+        # 步骤 1: 显示一个非常明确的警告信息
+        count = len(filepaths)
+        msg_box = QMessageBox(self.main_window)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("确认“一键标准化”操作")
+        msg_box.setText(f"您确定要对 {count} 个音频文件执行“一键标准化”吗？")
+        
+        informative_text = (
+            "此操作将执行以下处理并<b>直接覆盖原始文件</b>：<br>"
+            "<ul>"
+            "<li>重采样至 <b>44100 Hz</b></li>"
+            "<li>转换为<b>单声道</b></li>"
+            "<li>音量标准化 (RMS)</li>"
+            "<li>保存为 <b>WAV</b> 格式</li>"
+            "</ul>"
+            "<font color='red'><b>警告：此操作不可撤销！建议先备份您的数据。</b></font>"
+        )
+        msg_box.setInformativeText(informative_text)
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+
+        if msg_box.exec_() == QMessageBox.No:
+            return
+
+        # 步骤 2: 在执行前，重置音频管理器的播放器以释放文件句柄
+        if self.audio_manager_page and hasattr(self.audio_manager_page, 'reset_player'):
+            self.audio_manager_page.reset_player()
+            QApplication.processEvents() # 确保事件循环处理完请求
+
+        # 步骤 3: 设置并运行后台工作器
+        from PyQt5.QtWidgets import QProgressDialog
+
+        self.progress_dialog = QProgressDialog("正在准备处理...", "取消", 0, 100, self.main_window)
+        self.progress_dialog.setWindowTitle("快速标准化")
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.show()
+
+        self.thread = QThread()
+        self.worker = QuickNormalizeWorker(filepaths, self.main_window)
+        self.worker.moveToThread(self.thread)
+
+        self.progress_dialog.canceled.connect(self.worker.stop)
+        self.worker.progress.connect(self.progress_dialog.setValue)
+        self.worker.progress.connect(lambda val, msg: self.progress_dialog.setLabelText(msg))
+        
+        self.worker.finished_with_refresh_request.connect(self.on_quick_normalize_finished)
+
+        self.thread.started.connect(self.worker.run)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.worker.finished_with_refresh_request.connect(self.worker.deleteLater)
+        
+        self.thread.start()
+
+    # [新增] 快速标准化完成后的回调函数
+    def on_quick_normalize_finished(self):
+        self.thread.quit()
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+        
+        QMessageBox.information(self.main_window, "完成", "快速标准化处理已完成。")
+
+        # 请求音频管理器刷新其文件列表
+        if self.audio_manager_page and hasattr(self.audio_manager_page, 'populate_audio_table'):
+            self.audio_manager_page.populate_audio_table()

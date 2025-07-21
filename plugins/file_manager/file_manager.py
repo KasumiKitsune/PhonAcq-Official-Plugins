@@ -15,8 +15,14 @@ from PyQt5.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushBu
                              QMessageBox, QSplitter, QLabel, QMenu, QHeaderView, QLineEdit,
                              QTreeWidgetItemIterator, QApplication, QShortcut, QFormLayout,
                              QSlider, QDialogButtonBox, QCheckBox, QGroupBox)
-from PyQt5.QtCore import Qt, QSize, QBuffer, QByteArray, QObject, QEvent # QBuffer, QByteArray 用于图片Base64编码
-from PyQt5.QtGui import QIcon, QKeySequence, QPixmap # QPixmap 用于图片处理，QKeySequence 用于快捷键
+from PyQt5.QtCore import Qt, QSize, QBuffer, QByteArray, QObject, QEvent, QTimer # QBuffer, QByteArray 用于图片Base64编码
+from PyQt5.QtGui import QIcon, QKeySequence, QPixmap, QPainter, QColor, QPen # QPixmap 用于图片处理，QKeySequence 用于快捷键
+try:
+    import numpy as np
+    import soundfile as sf
+    AUDIO_LIBS_AVAILABLE = True
+except ImportError:
+    AUDIO_LIBS_AVAILABLE = False
 
 # --- 项目路径发现 ---
 # 插件必须是自给自足的，它自己计算项目根目录。
@@ -219,7 +225,159 @@ class TrashPolicyDialog(QDialog):
             self.accept() # 关闭对话框
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法保存策略文件:\n{e}")
+# --- Add these imports at the top of the file ---
+from PyQt5.QtWidgets import QScrollArea, QTextEdit
+from PyQt5.QtGui import QIntValidator, QDoubleValidator
 
+# ==============================================================================
+# Dynamic JSON Editor Dialog
+# ==============================================================================
+class DynamicJsonEditorDialog(QDialog):
+    """
+    A dialog that dynamically generates an editor UI based on the
+    structure and data types of an input JSON file.
+    """
+    def __init__(self, json_path, parent=None):
+        super().__init__(parent)
+        self.json_path = json_path
+        self.setWindowTitle(f"动态编辑: {os.path.basename(json_path)}")
+        self.setMinimumSize(500, 600)
+
+        # Stores the mapping from a full key path (e.g., 'ui.theme') to its widget and original type
+        self.widget_map = {}
+        
+        try:
+            with open(self.json_path, 'r', encoding='utf-8') as f:
+                self.data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "加载失败", f"无法读取或解析JSON文件:\n{e}")
+            # Use QTimer to close the dialog after the message box is shown
+            QTimer.singleShot(0, self.reject)
+            return
+
+        self._init_ui()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+
+        # Use a QScrollArea to handle potentially long configuration files
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        main_layout.addWidget(scroll_area)
+        
+        container_widget = QWidget()
+        scroll_area.setWidget(container_widget)
+        
+        self.form_layout = QFormLayout(container_widget)
+        self.form_layout.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        self.form_layout.setLabelAlignment(Qt.AlignRight)
+
+        # Start the recursive UI build process
+        self._build_ui_recursive(self.data, self.form_layout)
+
+        # Standard Save/Cancel buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.on_save)
+        button_box.rejected.connect(self.reject)
+        main_layout.addWidget(button_box)
+
+    def _build_ui_recursive(self, data_dict, parent_layout, prefix=""):
+        """
+        Recursively builds the editor UI from a dictionary.
+        :param data_dict: The dictionary (or sub-dictionary) to process.
+        :param parent_layout: The QLayout to add generated widgets to.
+        :param prefix: The key prefix for nested objects (e.g., 'audio_settings').
+        """
+        for key, value in data_dict.items():
+            full_key_path = f"{prefix}.{key}" if prefix else key
+
+            if isinstance(value, dict):
+                # For nested dictionaries, create a GroupBox and recurse
+                group_box = QGroupBox(key)
+                group_box.setStyleSheet("QGroupBox { font-weight: bold; }")
+                group_layout = QFormLayout(group_box)
+                group_layout.setRowWrapPolicy(QFormLayout.WrapAllRows)
+                self._build_ui_recursive(value, group_layout, full_key_path)
+                parent_layout.addRow(group_box)
+            else:
+                # For simple values, create a label and an appropriate editor widget
+                label = QLabel(f"{key}:")
+                widget = None
+                original_type = type(value)
+
+                if isinstance(value, bool):
+                    widget = QCheckBox()
+                    widget.setChecked(value)
+                elif isinstance(value, int):
+                    widget = QLineEdit(str(value))
+                    widget.setValidator(QIntValidator())
+                elif isinstance(value, float):
+                    widget = QLineEdit(str(value))
+                    widget.setValidator(QDoubleValidator())
+                elif isinstance(value, str):
+                    # Use QTextEdit for multiline strings, otherwise QLineEdit
+                    if '\n' in value or len(value) > 80:
+                         widget = QTextEdit(value)
+                         widget.setAcceptRichText(False)
+                         widget.setMinimumHeight(60)
+                    else:
+                         widget = QLineEdit(value)
+                elif value is None:
+                    widget = QLineEdit("null")
+                    widget.setEnabled(False)
+                else: # Fallback for other types like lists
+                    widget = QLineEdit(str(value))
+                    widget.setToolTip("此数据类型当前不支持直接编辑。")
+                    widget.setEnabled(False)
+
+                if widget:
+                    parent_layout.addRow(label, widget)
+                    # Only map editable widgets
+                    if widget.isEnabled():
+                        self.widget_map[full_key_path] = (widget, original_type)
+
+    def on_save(self):
+        """
+        Collects data from the UI, updates the internal data dictionary,
+        and saves it back to the JSON file.
+        """
+        try:
+            for full_key, (widget, original_type) in self.widget_map.items():
+                new_value = None
+                if isinstance(widget, QCheckBox):
+                    new_value = widget.isChecked()
+                elif isinstance(widget, QTextEdit):
+                    new_value = widget.toPlainText()
+                elif isinstance(widget, QLineEdit):
+                    text_value = widget.text()
+                    if original_type is int:
+                        new_value = int(text_value)
+                    elif original_type is float:
+                        new_value = float(text_value)
+                    else: # string
+                        new_value = text_value
+                
+                self._set_nested_dict_value(self.data, full_key, new_value)
+            
+            # Write the updated dictionary back to the file
+            with open(self.json_path, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, indent=4, ensure_ascii=False)
+            
+            QMessageBox.information(self, "成功", "配置文件已成功保存。")
+            self.accept()
+
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", f"保存文件时出错:\n{e}")
+
+    def _set_nested_dict_value(self, data_dict, key_path, value):
+        """
+        Sets a value in a nested dictionary using a dot-separated key path.
+        e.g., _set_nested_dict_value(data, 'ui.theme.color', '#FFF')
+        """
+        keys = key_path.split('.')
+        for key in keys[:-1]:
+            data_dict = data_dict.setdefault(key, {})
+        data_dict[keys[-1]] = value
 # ==============================================================================
 # 插件主类 (Plugin Entry Point)
 # ==============================================================================
@@ -770,7 +928,14 @@ class FileManagerDialog(QDialog):
         根据文件类型，调度不同的函数来生成详细的 HTML 格式工具提示。
         """
         file_type = self._get_file_type(path)
-        
+
+        if file_type == 'audio':
+            # 只有在音频库可用时才尝试生成波形图
+            if AUDIO_LIBS_AVAILABLE:
+                return self._tooltip_for_audio(path)
+            else:
+                # 否则，回退到只显示元数据
+                return self._tooltip_for_metadata(path)        
         if file_type == 'text':
             return self._tooltip_for_text(path)
         elif file_type == 'image':
@@ -789,6 +954,9 @@ class FileManagerDialog(QDialog):
         """
         if os.path.isdir(path): return 'folder'
         ext = os.path.splitext(path)[1].lower()
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg"}
+        if ext in audio_exts:
+            return 'audio'
         
         text_exts = {".txt", ".md", ".log", ".py", ".qss", ".csv", ".textgrid"}
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".svg"}
@@ -855,6 +1023,93 @@ class FileManagerDialog(QDialog):
             return tooltip_html if content else "[空文件]"
         except Exception:
             return "[无法预览]" # 读写文件出错时
+
+    def _format_time(self, ms):
+        """[新增] 格式化毫秒为 MM:SS.CS 字符串。从 audio_manager 模块借鉴而来。"""
+        if ms <= 0: return "00:00.00"
+        total_seconds = ms / 1000.0
+        m, s_frac = divmod(total_seconds, 60)
+        s_int = int(s_frac)
+        cs = int(round((s_frac - s_int) * 100))
+        if cs == 100: cs = 0; s_int +=1
+        if s_int == 60: s_int = 0; m += 1
+        return f"{int(m):02d}:{s_int:02d}.{cs:02d}"
+
+    def _tooltip_for_audio(self, path):
+        """
+        [新增] 为音频文件生成包含元数据和波形预览的Tooltip。
+        """
+        try:
+            # --- 1. 读取音频数据和元信息 ---
+            info = sf.info(path)
+            duration_ms = info.duration * 1000
+            
+            # =================== [核心修正] ===================
+            # 不再使用依赖新版本 soundfile 的复杂计算方式。
+            # 直接使用 os.stat() 获取文件在磁盘上的实际大小，这更简单、更健壮。
+            size_bytes = os.stat(path).st_size
+            size_str = f"{size_bytes / 1024:.1f} KB" if size_bytes > 1024 else f"{size_bytes} B"
+            # ================================================
+
+            # --- 2. 创建一个离屏的 QPixmap 用于绘制 (保持不变) ---
+            WAVEFORM_WIDTH = 280
+            WAVEFORM_HEIGHT = 60
+            pixmap = QPixmap(WAVEFORM_WIDTH, WAVEFORM_HEIGHT)
+            pixmap.fill(Qt.transparent)
+
+            # --- 3. 使用 QPainter 绘制波形 (保持不变) ---
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            data, sr = sf.read(path, dtype='float32', stop=int(info.samplerate * 5))
+            if data.ndim > 1: data = data.mean(axis=1)
+            
+            num_samples = len(data)
+            target_points = WAVEFORM_WIDTH
+            if num_samples > target_points:
+                step = num_samples // target_points
+                peak_data = [np.max(np.abs(data[i:i+step])) for i in range(0, num_samples, step)]
+                waveform_data = np.array(peak_data)
+            else:
+                waveform_data = data
+
+            h, w = WAVEFORM_HEIGHT, WAVEFORM_WIDTH
+            half_h = h / 2
+            max_val = np.max(waveform_data) if len(waveform_data) > 0 else 1.0
+            if max_val == 0: max_val = 1.0
+            
+            pen_color = QColor("#5D90C3") 
+            painter.setPen(QPen(pen_color, 1))
+
+            for i, val in enumerate(waveform_data):
+                x = int(i * w / target_points)
+                y_offset = (val / max_val) * half_h
+                painter.drawLine(x, int(half_h - y_offset), x, int(half_h + y_offset))
+            
+            painter.end()
+
+            # --- 4. 将 QPixmap 转换为 Base64 (保持不变) ---
+            byte_array = QByteArray()
+            buffer = QBuffer(byte_array)
+            buffer.open(QBuffer.WriteOnly)
+            pixmap.save(buffer, "PNG")
+            base64_data = byte_array.toBase64().data().decode()
+            uri = f"data:image/png;base64,{base64_data}"
+
+            # --- 5. 构建最终的 HTML Tooltip (保持不变) ---
+            html = f"""
+            <div style='max-width: 300px;'>
+                <b>{os.path.basename(path)}</b><br>
+                时长: {self._format_time(duration_ms)} | {info.samplerate} Hz | {size_str}
+                <hr>
+                <img src='{uri}' width='{WAVEFORM_WIDTH}' height='{WAVEFORM_HEIGHT}'>
+            </div>
+            """
+            return html
+
+        except Exception as e:
+            print(f"[File Manager] Tooltip for audio failed for '{path}': {e}")
+            return self._tooltip_for_metadata(path)
 
     def _tooltip_for_image(self, path):
         """
@@ -1141,9 +1396,17 @@ class FileManagerDialog(QDialog):
             self._populate_nav_tree() # 重建左侧树
         self._populate_file_view(dest_dir) # 刷新右侧文件列表
 
+
     def _on_item_double_clicked(self, item):
         path = self.file_view.item(item.row(), 0).data(Qt.UserRole)
         if not path: return
+        # [新增] 拦截对 .json 配置文件的双击
+        filename = os.path.basename(path).lower()
+        if filename in ("settings.json", "config.json"):
+            # 创建并执行我们的动态编辑器
+            editor_dialog = DynamicJsonEditorDialog(path, self)
+            editor_dialog.exec_()
+            return # 处理完毕，不再执行后续逻辑
         
         # 拦截对回收站策略文件的双击，打开配置对话框
         if os.path.realpath(path) == os.path.realpath(self.trash_policy_config_path):
