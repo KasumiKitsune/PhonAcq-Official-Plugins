@@ -261,14 +261,39 @@ class SyncDialog(QDialog):
             self.targets_table.setItem(i, 0, status_item); self.targets_table.setItem(i, 1, name_item); self.targets_table.setItem(i, 2, path_item)
             self._update_row_status(i, self.target_statuses.get(target_id, "pending"))
     def on_add_target(self):
-        base_path = self.main_window.BASE_PATH; directory = QFileDialog.getExistingDirectory(self, "选择要添加的备份文件夹", base_path)
-        if not directory or not directory.startswith(base_path):
-            if directory: QMessageBox.warning(self, "路径无效", "请选择程序根目录下的一个文件夹进行备份。"); return
-        relative_path = os.path.relpath(directory, base_path).replace('\\', '/'); name, ok = QInputDialog.getText(self, "输入项目名称", f"为文件夹 '{relative_path}' 设置一个备份名称:")
-        if not (ok and name): return
-        target_id = f"custom_{int(time.time())}"; new_target = {"id": target_id, "name": name, "path": relative_path}
-        custom_targets = self.config_manager.get("custom_targets", []); custom_targets.append(new_target)
-        self.config_manager.set("custom_targets", custom_targets); self.populate_targets_table()
+        base_path = self.main_window.BASE_PATH
+        directory = QFileDialog.getExistingDirectory(self, "选择要添加的备份文件夹", base_path)
+
+        if not directory:
+            return
+
+        # --- [核心修正] ---
+        # 1. 对两个路径进行标准化处理，以忽略大小写和分隔符的差异。
+        #    os.path.normpath 会统一分隔符 (e.g., C:/path -> C:\path)
+        #    os.path.normcase 会在Windows上将整个路径转为小写 (e.g., C:\path -> c:\path)
+        norm_directory = os.path.normcase(os.path.normpath(directory))
+        norm_base_path = os.path.normcase(os.path.normpath(base_path))
+
+        # 2. 在标准化的路径上进行比较。
+        if not norm_directory.startswith(norm_base_path):
+            QMessageBox.warning(self, "路径无效", "请选择程序根目录下的一个文件夹进行备份。")
+            return
+        
+        # 只有通过了以上所有检查，代码才会继续执行到这里
+        relative_path = os.path.relpath(directory, base_path).replace('\\', '/')
+        name, ok = QInputDialog.getText(self, "输入项目名称", f"为文件夹 '{relative_path}' 设置一个备份名称:")
+        
+        if not (ok and name): 
+            return
+            
+        target_id = f"custom_{int(time.time())}"
+        new_target = {"id": target_id, "name": name, "path": relative_path}
+        
+        custom_targets = self.config_manager.get("custom_targets", [])
+        custom_targets.append(new_target)
+        self.config_manager.set("custom_targets", custom_targets)
+        
+        self.populate_targets_table()
     def on_remove_target(self):
         current_row = self.targets_table.currentRow();
         if current_row < 0: QMessageBox.information(self, "提示", "请先在列表中选择一个要移除的自定义项目。"); return
