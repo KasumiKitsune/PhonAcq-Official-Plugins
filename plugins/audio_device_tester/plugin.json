@@ -1,0 +1,12 @@
+{
+    "id": "com.phonacq.audio_device_tester",
+    "name": "录音测试器",
+    "version": "1.0.0",
+    "author": "PhonAcq Assistant Team",
+    "description": "提供一个可视化界面来测试所有可用的录音设备，实时显示音量，并支持录制和回放样本以检查音质。",
+    "main_file": "audio_tester.py",
+    "entry_class": "AudioDeviceTesterPlugin",
+    "icon": "icons/test.png",
+    "manual_file": "manual.md",
+    "tags": ["音频", "工具", "设置"]
+}
