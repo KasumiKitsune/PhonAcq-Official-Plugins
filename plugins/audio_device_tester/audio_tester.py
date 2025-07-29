@@ -8,6 +8,7 @@ import sounddevice as sd
 import soundfile as sf
 import tempfile
 import time
+import subprocess
 
 # PyQt5 核心模块导入
 from PyQt5.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -469,10 +470,10 @@ class TesterDialog(QDialog):
         
         # --- 顶部按钮栏：全局测试控制 ---
         top_layout = QHBoxLayout()
-        self.test_all_btn = QPushButton("开始全部测试")
+        self.test_all_btn = QPushButton("开始测试")
         self.test_all_btn.setIcon(self.icon_manager.get_icon("play_audio"))
         self.test_all_btn.setToolTip("并行监听所有<b>已启用</b>的设备5秒，快速识别哪个麦克风正在工作。<br>音量条会实时显示信号强度，测试结束后会标记出<b>有信号</b>和<b>无信号</b>的设备。")
-        self.stop_all_btn = QPushButton("停止全部测试")
+        self.stop_all_btn = QPushButton("停止测试")
         self.stop_all_btn.setIcon(self.icon_manager.get_icon("stop"))
         self.stop_all_btn.setEnabled(False) # 初始禁用
         self.stop_all_btn.setToolTip("提前停止对所有设备的并行监听。")
@@ -513,6 +514,7 @@ class TesterDialog(QDialog):
         self.stop_all_btn.clicked.connect(self.stop_all_tests)
         self.device_list_widget.currentItemChanged.connect(self.on_device_selected)
         self.device_list_widget.customContextMenuRequested.connect(self.show_context_menu) # 右键菜单
+        self.device_list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.record_btn.clicked.connect(self.record_sample)
         self.playback_btn.clicked.connect(self.playback_sample)
         self.set_default_btn.clicked.connect(self.set_as_default)
@@ -636,6 +638,25 @@ class TesterDialog(QDialog):
 
         # 每次切换设备都重置回放按钮的状态，因为录音样本是设备绑定的
         self.playback_btn.setEnabled(False)
+    def on_item_double_clicked(self, item):
+        """
+        [v3.6 修复] 当用户双击设备项时，在Windows上打开系统的声音录制设备设置。
+        使用 os.system() 以确保命令行参数被正确解析。
+        """
+        if sys.platform != "win32":
+            return
+
+        try:
+            # --- [核心修复] ---
+            # 使用 os.system() 将整个命令作为一个字符串传递给系统命令解释器。
+            # 这能最可靠地模拟用户在“运行”中输入命令的行为。
+            # 'start' 命令会以非阻塞方式打开控制面板。
+            command = 'start control.exe mmsys.cpl,,1'
+            os.system(command)
+            # --- [修复结束] ---
+            
+        except Exception as e:
+            QMessageBox.warning(self, "操作失败", f"无法打开系统声音设置:\n{e}")
 
     def start_all_tests(self):
         """

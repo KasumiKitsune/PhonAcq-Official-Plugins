@@ -50,6 +50,13 @@ except ImportError:
     # 如果在独立测试插件时，确保能找到 plugin_system.py
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'modules')))
     from modules.plugin_system import BasePlugin
+try:
+    from modules.custom_widgets_module import ColorButton
+except ImportError:
+    # 如果 custom_widgets_module 不存在或导入失败，提供一个回退方案
+    # 这确保了即使在旧版本或模块缺失时，插件也不会完全崩溃
+    print("[Vowel Plotter Warning] Could not import ColorButton from custom_widgets_module. Using a fallback.")
+    ColorButton = QPushButton
 
 # ==============================================================================
 # 辅助类：PandasModel
@@ -79,100 +86,6 @@ class PandasModel(QAbstractTableModel):
             if orientation == Qt.Vertical:
                 return str(self._data.index[section])
         return None
-
-# ==============================================================================
-# 辅助类：CustomColorPopup
-# 一个简洁的弹出式调色板
-# ==============================================================================
-class CustomColorPopup(QDialog):
-    colorSelected = pyqtSignal(QColor) # 颜色选择信号
-
-    def __init__(self, parent=None):
-        super().__init__(parent, Qt.Popup)
-        # 为弹窗自身设置固定样式，避免继承父控件背景色
-        self.setStyleSheet("""
-            QDialog {
-                background-color: white;
-                border: 1px solid #CCCCCC;
-                border-radius: 4px;
-            }
-            QFrame { /* 色块按钮样式 */
-                background-color: lightgray;
-                border-radius: 4px;
-                border: 1px solid #e0e0e0;
-            }
-            QFrame:hover {
-                border: 2px solid #0078d7; /* 鼠标悬停时的边框高亮 */
-            }
-        """)
-        # 定义预设颜色列表
-        self.colors = ['#d32f2f','#f57c00','#4caf50','#1976d2','#9c27b0','#e91e63','#b71c1c','#e65100','#1b5e20','#0d47a1','#4a148c','#880e4f','#fbc02d','#8bc34a','#00bcd4','#03a9f4','#ff4081','#ff9800','#ffcdd2','#ffccbc','#c8e6c9','#bbdefb','#e1bee7','#fff9c4','#a1887f','#795548','#8d6e63','#00897b','#455a64','#546e7a','#ffffff','#eeeeee','#bdbdbd','#757575','#424242','#000000','#cddc39','#673ab7','#29b6f6','#ff7043','#ec407a','#7e57c2']
-        
-        layout = QGridLayout()
-        layout.setSpacing(4) # 色块间距
-        layout.setContentsMargins(10, 10, 10, 10) # 内部边距
-        self.setLayout(layout)
-        
-        # 动态创建颜色按钮并添加到网格布局
-        cols = 6 
-        for i, color_hex in enumerate(self.colors):
-            row, col = divmod(i, cols)
-            
-            color_widget = QFrame()
-            color_widget.setFixedSize(24, 24)
-            color_widget.setStyleSheet(f"background-color: {color_hex};") # 背景色由QFrame的background-color控制
-            color_widget.setCursor(Qt.PointingHandCursor)
-            
-            # 使用 lambda 表达式连接点击事件，传递颜色值
-            color_widget.mousePressEvent = lambda event, c=QColor(color_hex): self.on_color_click(c)
-            
-            layout.addWidget(color_widget, row, col)
-
-    def on_color_click(self, color):
-        """当用户点击某个颜色时，发射信号并关闭弹窗。"""
-        self.colorSelected.emit(color)
-        self.close()
-
-# ==============================================================================
-# 辅助类：ColorButton
-# 一个可点击的标签，显示颜色，点击弹出调色板
-# ==============================================================================
-class ColorButton(QLabel):
-    colorChanged = pyqtSignal() # 颜色改变信号
-
-    def __init__(self, color=Qt.black, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(50, 20) # 固定大小
-        self.set_color(QColor(color)) # 设置初始颜色
-        self.popup = None # 存储调色板弹窗实例
-
-    def set_color(self, color):
-        """设置按钮的颜色并更新样式。"""
-        self._color = QColor(color)
-        self.setStyleSheet(
-            f"background-color: {self._color.name()};"
-            "border-radius: 10px;"
-            "border: 1px solid #AAAAAA;"
-        )
-        self.setToolTip(f"点击选择颜色 (当前: {self._color.name()})")
-        self.colorChanged.emit() # 发射颜色改变信号
-
-    def color(self):
-        """返回当前按钮的颜色。"""
-        return self._color
-
-    def mousePressEvent(self, event):
-        """鼠标点击时显示调色板。"""
-        if event.button() == Qt.LeftButton:
-            # 单例模式，如果弹窗不存在则创建
-            if not self.popup:
-                self.popup = CustomColorPopup(self)
-                self.popup.colorSelected.connect(self.set_color) # 连接颜色选择信号
-            
-            # 将弹窗移动到按钮下方
-            point = self.mapToGlobal(self.rect().bottomLeft())
-            self.popup.move(point)
-            self.popup.show()
 
 # ==============================================================================
 # 图层配置对话框 (LayerConfigDialog)
@@ -683,6 +596,7 @@ class PlotterDialog(QDialog):
         # 动态生成的分组颜色和复选框
         self.group_settings_scroll = QScrollArea()
         self.group_settings_scroll.setWidgetResizable(True)
+        self.group_settings_scroll.setMinimumHeight(200)
         self.group_settings_scroll.setFrameShape(QScrollArea.NoFrame)
         self.group_settings_widget = QWidget()
         self.group_settings_layout = QVBoxLayout(self.group_settings_widget)
