@@ -9,6 +9,8 @@ import soundfile as sf
 import tempfile
 import time
 import subprocess
+from collections import deque # 用于音量计平滑
+import queue # 用于线程间音量数据传输
 
 # PyQt5 核心模块导入
 from PyQt5.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -30,22 +32,25 @@ except ImportError:
 # 负责并行监听多个音频设备，实时报告音量，并捕获设备打开错误。
 # ==============================================================================
 class TestWorker(QThread):
-    volume_update = pyqtSignal(int, float) # 实时音量更新信号: device_index, volume_value
+    volume_update = pyqtSignal(int, np.ndarray) # 信号传递 numpy 数组
     device_error = pyqtSignal(int, str)    # 设备打开错误信号: device_index, error_message
     device_disable_request = pyqtSignal(int) # 请求禁用设备的信号: device_index
     test_finished = pyqtSignal(dict)       # 所有设备测试完成信号: results_dict
 
-    def __init__(self, devices_to_test):
+    def __init__(self, devices_to_test, duration=None):
         """
         初始化 TestWorker。
         :param devices_to_test: 要测试的设备信息列表。
+        :param duration: (可选) 测试的持续时间（秒）。如果为None，则持续运行直到stop()被调用。
         """
         super().__init__()
         self.devices_to_test = devices_to_test
-        self._is_running = False # 线程运行标志
+        self.duration = duration # 用于区分“全部测试”和“单独测试”
+        self._is_running = False 
         self.streams = [] # 存储所有已成功打开的音频流
         self.detected_sound = set() # 记录哪些设备检测到了有效声音
         self.opened_streams_info = {} # 存储成功打开设备的原始信息
+        self.SILENCE_THRESHOLD_RMS = 0.002 # 使用与 SampleAnalysisWorker 一致的、更灵敏的阈值
 
     def run(self):
         """线程主入口点，执行音频设备的并行监听。"""
@@ -53,74 +58,62 @@ class TestWorker(QThread):
         try:
             for dev in self.devices_to_test:
                 try:
-                    # 尝试为每个设备打开一个输入流
                     stream = sd.InputStream(
-                        device=dev['index'],          # 设备索引
-                        channels=1,                   # 单声道
-                        samplerate=dev['default_samplerate'], # 设备的默认采样率
+                        device=dev['index'],
+                        channels=1,
+                        samplerate=dev['default_samplerate'],
                         callback=lambda indata, f, t, s, index=dev['index']: self.audio_callback(indata, index)
                     )
-                    stream.start() # 启动流
-                    self.streams.append(stream) # 将流添加到列表中
-                    self.opened_streams_info[dev['index']] = dev # 记录成功打开的设备信息
+                    stream.start()
+                    self.streams.append(stream)
+                    self.opened_streams_info[dev['index']] = dev
                 except Exception as e:
-                    # 捕获设备打开失败的错误
                     error_str = str(e)
                     print(f"警告: 无法打开设备 {dev['index']} ({dev['name']}): {error_str}")
-                    self.device_error.emit(dev['index'], error_str) # 通知UI设备出错
+                    self.device_error.emit(dev['index'], error_str)
                     if "Invalid device" in error_str:
-                        # 如果是“无效设备”错误，请求禁用该设备
                         self.device_disable_request.emit(dev['index'])
-                    continue # 继续尝试打开下一个设备
+                    continue
 
-            # 如果没有任何流被成功打开，则直接结束测试
             if not self.streams and len(self.devices_to_test) > 0:
                 self.test_finished.emit({})
                 return
 
-            # 保持线程存活并接收回调，最多运行5秒
-            start_time = time.time()
-            while self._is_running and time.time() - start_time < 5:
-                self.msleep(100) # 短暂休眠，避免CPU空转
+            # 根据是否有 duration 参数，决定运行模式
+            if self.duration:
+                # 定时模式 (用于“全部测试”)
+                start_time = time.time()
+                while self._is_running and time.time() - start_time < self.duration:
+                    self.msleep(100)
+            else:
+                # 持续模式 (用于“单独测试”)
+                while self._is_running:
+                    self.msleep(100)
 
         except Exception as e:
-            # 捕获线程运行过程中的严重错误
             self.error.emit(f"音频测试线程发生严重错误: {e}")
         finally:
-            self._is_running = False # 确保循环终止
-            # 停止并关闭所有已打开的流
+            self._is_running = False 
             for stream in self.streams:
-                try:
-                    stream.stop()
-                    stream.close()
-                except Exception:
-                    pass # 忽略关闭流时可能发生的错误
+                try: stream.stop(); stream.close()
+                except Exception: pass
             self.streams = []
 
-            # 整理并发送最终测试结果
             results = {}
             for dev_id in self.opened_streams_info.keys():
-                if dev_id in self.detected_sound:
-                    results[dev_id] = "has_signal"  # 检测到声音
-                else:
-                    results[dev_id] = "no_signal"   # 成功打开但未检测到声音
+                results[dev_id] = "has_signal" if dev_id in self.detected_sound else "no_signal"
             self.test_finished.emit(results)
 
     def audio_callback(self, indata, device_index):
-        """
-        音频流回调函数，实时处理音频数据并更新音量。
-        :param indata: 输入音频数据块。
-        :param device_index: 设备的索引。
-        """
         if not self._is_running: return
-        # 计算音量（均方根范数），并将其缩放到适合 QProgressBar 的范围
-        volume_norm = np.linalg.norm(indata) * 10
-        if volume_norm > 5: # 设定一个阈值以判断为有效声音信号
+        self.volume_update.emit(device_index, indata.copy())
+        
+        # 使用 RMS 值进行声音检测，与样本分析保持一致
+        rms = np.sqrt(np.mean(np.square(indata)))
+        if rms > self.SILENCE_THRESHOLD_RMS:
             self.detected_sound.add(device_index)
-        self.volume_update.emit(device_index, volume_norm)
 
     def stop(self):
-        """停止线程的运行。"""
         self._is_running = False
 
 # ==============================================================================
@@ -129,7 +122,7 @@ class TestWorker(QThread):
 # ==============================================================================
 class RecordingWorker(QThread):
     recording_finished = pyqtSignal(bool, str) # 录制完成信号: success, filepath_or_error
-    volume_update = pyqtSignal(int, float)     # 实时音量更新信号: device_index, volume_value
+    volume_update = pyqtSignal(int, np.ndarray) # 信号传递 numpy 数组
 
     def __init__(self, device_info, filepath):
         """
@@ -141,44 +134,38 @@ class RecordingWorker(QThread):
         self.device_info = device_info
         self.filepath = filepath
         self._is_running = False
-        self.audio_data = [] # 存储录制到的音频数据
+        self.audio_data_queue = queue.Queue() # 使用队列进行线程间数据传输
 
     def run(self):
-        """线程主入口点，执行3秒音频录制。"""
         self._is_running = True
-        self.audio_data = [] # 清空上次的录音数据
-        
         try:
             samplerate = int(self.device_info['default_samplerate'])
             
-            # 定义音频回调函数，实时收集数据并更新音量条
             def callback(indata, frames, time, status):
-                if self._is_running:
-                    self.audio_data.append(indata.copy())
-                    volume_norm = np.linalg.norm(indata) * 10
-                    self.volume_update.emit(self.device_info['index'], volume_norm)
+                if self._is_running: # 只有在线程被标记为运行时才收集数据
+                    self.audio_data_queue.put(indata.copy())
+                    self.volume_update.emit(self.device_info['index'], indata.copy())
 
-            # 打开输入流并录制3秒
             with sd.InputStream(device=self.device_info['index'], channels=1, samplerate=samplerate, callback=callback):
-                self.sleep(3) # 线程休眠3秒以录制指定时长
+                while self._is_running: # 持续录制，直到外部调用 stop()
+                    self.msleep(100) # 短暂休眠，避免CPU空转，等待 stop() 信号
+            
+            # 停止后，从队列中收集所有数据
+            recorded_chunks = []
+            while not self.audio_data_queue.empty():
+                recorded_chunks.append(self.audio_data_queue.get_nowait())
 
-            self._is_running = False # 录制完成，标记停止
-
-            # 检查是否录制到数据
-            if not self.audio_data:
+            if not recorded_chunks:
                 raise RuntimeError("录音数据为空，未采集到任何信号。请检查麦克风是否工作。")
 
-            # 将录制到的数据连接起来并保存为WAV文件
-            recording = np.concatenate(self.audio_data, axis=0)
+            recording = np.concatenate(recorded_chunks, axis=0)
             sf.write(self.filepath, recording, samplerate)
-            self.recording_finished.emit(True, self.filepath) # 发射成功信号
+            self.recording_finished.emit(True, self.filepath)
 
         except Exception as e:
-            # 捕获录制过程中的错误
-            self.recording_finished.emit(False, str(e)) # 发射失败信号
+            self.recording_finished.emit(False, str(e))
 
     def stop(self):
-        """停止线程的运行（如果需要提前停止）。"""
         self._is_running = False
 
 # ==============================================================================
@@ -234,7 +221,7 @@ class SampleAnalysisWorker(QRunnable):
         self.filepath = filepath
         self.signals = SampleAnalysisSignals()
         # 定义一个非常低的 RMS 阈值，低于此值视为静音
-        self.SILENCE_THRESHOLD_RMS = 0.005 
+        self.SILENCE_THRESHOLD_RMS = 0.002 
 
     def run(self):
         """任务主入口点，执行样本分析。"""
@@ -257,7 +244,7 @@ class SampleAnalysisWorker(QRunnable):
                 self.signals.analysis_finished.emit(self.device_id, "no_signal")
             else:
                 # 高于阈值，视为成功验证（有信号）
-                self.signals.analysis_finished.emit(self.device_id, "verified")
+                self.signals.analysis_finished.emit(self.device_id, "has_signal") # 更改为 has_signal，而不是 verified
 
         except Exception as e:
             # 捕获分析过程中的错误
@@ -281,8 +268,12 @@ class AudioDeviceTesterPlugin(BasePlugin):
         """
         super().__init__(main_window, plugin_manager)
         self.dialog = None # 存储对话框实例
-        self.plugin_dir = os.path.dirname(__file__)
-        self.config_path = os.path.join(self.plugin_dir, 'device_config.json') # 插件配置文件路径
+        
+        # [核心修正] 在这里初始化 self.plugin_dir
+        self.plugin_dir = os.path.dirname(__file__) 
+
+        # 配置文件路径现在可以安全地使用 self.plugin_dir
+        self.config_path = os.path.join(self.plugin_dir, 'config.json') 
         self.device_config = self._load_device_config() # 加载设备配置
         self.original_populate_method = None # 用于存储被猴子补丁的原始方法
 
@@ -388,12 +379,14 @@ class AudioDeviceTesterPlugin(BasePlugin):
                         # 检查是否有自定义名称
                         custom_name = self.device_config.get(device_id, {}).get("name")
                         if custom_name:
-                            display_name = f"{custom_name} ({device['name']})" # 显示自定义名称和原始名称
+                            display_name = f"{custom_name}" # 显示自定义名称
                         else:
                             display_name = device['name'] # 否则显示原始名称
                         
                         # 判断是否为系统默认设备
                         is_default_system = (i == default_input_idx)
+                        
+                        # 在专家模式下，不显示原始名称的括号，避免冗余
                         settings_page.input_device_combo.addItem(f"{display_name}" + (" (系统推荐)" if is_default_system else ""), i)
             except Exception as e:
                 print(f"获取录音设备失败 (补丁版): {e}")
@@ -421,8 +414,17 @@ class TesterDialog(QDialog):
         self.devices = []          # 存储所有扫描到的设备信息
         self.device_widgets = {}   # 存储设备列表项对应的UI控件（QLabel, QProgressBar）
         self.active_test_workers = {} # 存储当前活动的 TestWorker 线程
-        self.recorded_sample = None # 存储录制的样本音频数据
+        
+        self.is_recording_sample = False # 录制状态标志
+        self.recording_worker = None     # 存储当前录音 worker
+        self.recorded_sample = None      # 存储录制的样本音频数据 (文件路径)
         self.sample_filepath = os.path.join(tempfile.gettempdir(), "phonacq_test_sample.wav") # 临时文件路径
+
+        # 音量计平滑处理所需的状态变量
+        self.volume_meter_queues = {}  # {device_id: queue}
+        self.volume_histories = {}     # {device_id: deque}
+        self.volume_update_timer = QTimer(self)
+        self.volume_update_timer.timeout.connect(self.update_all_volume_meters)
 
         self._load_status_icons() # 加载状态图标（错误、警告、成功、已验证）
         self.analysis_thread_pool = QThreadPool() # 用于样本分析的线程池
@@ -433,37 +435,38 @@ class TesterDialog(QDialog):
         self._populate_device_list() # 填充设备列表
 
     def _load_status_icons(self):
-        """从插件的 icons 目录和主程序的 icon_manager 加载各种状态图标。"""
+        """
+        [v1.1 健壮版] 从插件的 icons 目录和主程序的 icon_manager 加载各种状态图标。
+        确保即使在图标被禁用或文件缺失时也不会导致程序崩溃。
+        """
         self.status_icons = {}
         icon_dir = os.path.join(self.plugin.plugin_dir, 'icons')
         
-        # 定义需要加载的图标及其文件名
-        icons_to_load = ["error", "warn", "success", "checked"]
+        icons_to_load = ["error", "warn", "success", "checked", "record", "stop", "lock", "unlock"]
         
         for name in icons_to_load:
-            for ext in ['.png', '.svg']: # 优先 PNG，因为我们指定了大小
-                path = os.path.join(icon_dir, f"{name}{ext}")
-                if os.path.exists(path):
-                    self.status_icons[name] = QIcon(path)
-                    break # 找到后就停止搜索
-        
-        # --- [核心修复] ---
-        # 明确地加载 lock 和 unlock 图标，并优先从主程序的 icon_manager 获取
-        # 以确保样式统一。如果主程序没有，再尝试从插件目录加载。
-        self.status_icons["lock"] = self.icon_manager.get_icon("lock")
-        self.status_icons["unlock"] = self.icon_manager.get_icon("unlock")
+            final_icon = None # 初始化为空
 
-        # 检查是否成功从 icon_manager 加载，如果没有，则尝试从本地文件回退
-        if self.status_icons["lock"].isNull():
-            lock_path = os.path.join(icon_dir, "lock.png")
-            if os.path.exists(lock_path):
-                self.status_icons["lock"] = QIcon(lock_path)
+            # 1. 优先尝试从主程序的 icon_manager 获取
+            icon_from_manager = self.icon_manager.get_icon(name)
+            if icon_from_manager and not icon_from_manager.isNull():
+                final_icon = icon_from_manager
 
-        if self.status_icons["unlock"].isNull():
-            unlock_path = os.path.join(icon_dir, "unlock.png")
-            if os.path.exists(unlock_path):
-                self.status_icons["unlock"] = QIcon(unlock_path)
-        # --- [修复结束] ---
+            # 2. 如果从 manager 获取失败，则尝试从插件本地文件加载
+            if not final_icon:
+                for ext in ['.png', '.svg']:
+                    path = os.path.join(icon_dir, f"{name}{ext}")
+                    if os.path.exists(path):
+                        final_icon = QIcon(path)
+                        break
+            
+            # --- [核心修正] ---
+            # 3. 无论加载成功与否，都确保向字典中存入一个有效的 QIcon 对象。
+            #    如果 final_icon 仍然是 None，就存入一个空的 QIcon()。
+            #    这可以防止 setIcon() 接收到 NoneType 参数。
+            self.status_icons[name] = final_icon if final_icon else QIcon()
+
+
     def _init_ui(self):
         """构建对话框的用户界面布局。"""
         layout = QVBoxLayout(self)
@@ -489,24 +492,22 @@ class TesterDialog(QDialog):
         
         # --- 底部操作栏：样本录制与默认设置 ---
         bottom_layout = QHBoxLayout()
-        self.record_btn = QPushButton("录制3秒样本")
-        self.record_btn.setIcon(self.icon_manager.get_icon("record"))
-        self.record_btn.setToolTip("为当前选中的设备录制一段3秒的音频，用于<b>主观评估音质</b>。录制时，其他并行测试将自动暂停。")
+        # 录制按钮初始文本和图标
+        self.record_btn = QPushButton("开始录制样本") 
+        self.record_btn.setIcon(self.status_icons.get("record")) # 使用 record 图标
+        self.record_btn.setToolTip("开始为当前选中的设备录制一段音频，点击再次点击按钮停止录制。")
+        
         self.playback_btn = QPushButton("回放样本")
         self.playback_btn.setIcon(self.icon_manager.get_icon("play_audio"))
         self.playback_btn.setToolTip("播放刚刚录制的音频样本。")
-        self.set_default_btn = QPushButton("将此设为默认")
-        self.set_default_btn.setToolTip("将当前选中的设备设为整个程序的默认录音设备。<br>(会自动切换到专家模式)")
         
         # 初始禁用底部按钮
         self.record_btn.setEnabled(False)
         self.playback_btn.setEnabled(False)
-        self.set_default_btn.setEnabled(False)
         
         bottom_layout.addWidget(self.record_btn)
         bottom_layout.addWidget(self.playback_btn)
         bottom_layout.addStretch() # 填充空白
-        bottom_layout.addWidget(self.set_default_btn)
         layout.addLayout(bottom_layout)
         
         # --- 连接信号与槽 ---
@@ -517,7 +518,6 @@ class TesterDialog(QDialog):
         self.device_list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.record_btn.clicked.connect(self.record_sample)
         self.playback_btn.clicked.connect(self.playback_sample)
-        self.set_default_btn.clicked.connect(self.set_as_default)
 
     def _populate_device_list(self):
         current_row = self.device_list_widget.currentRow()
@@ -538,17 +538,27 @@ class TesterDialog(QDialog):
                     display_name = f"{custom_name}" if custom_name else dev['name']
 
                     status_icon_label = QLabel(); status_icon_label.setFixedSize(24, 24)
-                    name_label = QLabel(f"<b>{display_name}</b><br><small>原始名称: {dev['name']}</small>" if custom_name else f"<b>{dev['name']}</b><br><small>索引: {i}, 通道: {dev['max_input_channels']}</small>")
+                    
+                    # 构建包含更丰富信息的HTML字符串，并设置最小高度
+                    info_html = (
+                        f"<b>{display_name}</b><br>"
+                        f"<small style='color: #666;'>{dev['default_samplerate']:.0f} Hz | {dev['max_input_channels']} 通道 | 索引: {i}</small>"
+                    )
+                    # 如果有自定义名称，再额外显示原始名称
+                    if custom_name:
+                        info_html += f"<br><small style='color: #888;'>原始名称: {dev['name']}</small>"
+
+                    name_label = QLabel(info_html)
                     name_label.setWordWrap(True)
+                    # 确保足够的最小高度，以容纳三行文本
+                    name_label.setMinimumHeight(60) 
+
                     volume_bar = QProgressBar(); volume_bar.setRange(0, 100); volume_bar.setValue(0); volume_bar.setTextVisible(False)
                     
                     item_layout.addWidget(status_icon_label); item_layout.addWidget(name_label, 1); item_layout.addWidget(volume_bar, 1)
                     
-                    # --- [核心修复] ---
-                    # 移除这里的 setStyleSheet 调用。所有视觉状态都由 update_status_icon 统一管理。
-                    # --- [修复结束] ---
-                    
                     self.device_list_widget.addItem(item); self.device_list_widget.setItemWidget(item, item_widget)
+                    # 关键一步：让 item 的尺寸提示根据 widget 的实际大小来决定
                     item.setSizeHint(item_widget.sizeHint())
                     self.device_widgets[i] = {'item': item, 'bar': volume_bar, 'label': name_label, 'status_icon': status_icon_label}
                     self.update_status_icon(i, status, config.get("error_msg"))
@@ -569,7 +579,6 @@ class TesterDialog(QDialog):
         # 默认清除样式
         info['label'].setStyleSheet("")
         
-        # --- [核心修复] ---
         # 统一的状态机，确保 error 状态的最高优先级
         if status == "error":
             icon = self.status_icons.get("error")
@@ -577,7 +586,7 @@ class TesterDialog(QDialog):
             info['label'].setStyleSheet("color: grey;")
         elif is_disabled:
             # 如果设备被禁用（且没有错误），显示灰色文字，但不显示状态图标
-            icon_label.clear()
+            icon_label.clear() 
             tooltip = "此设备已被禁用。"
             info['label'].setStyleSheet("color: grey;")
         elif status == "no_signal":
@@ -587,7 +596,6 @@ class TesterDialog(QDialog):
             icon = self.status_icons.get("success"); tooltip = "<b>检测到信号</b><br>设备工作正常。"
         elif status == "verified":
             icon = self.status_icons.get("checked"); tooltip = "<b>已验证</b><br>您已通过录制和回放确认此设备可用。"
-        # --- [修复结束] ---
         
         if icon: icon_label.setPixmap(icon.pixmap(24, 24)); icon_label.setToolTip(tooltip)
         else: icon_label.clear(); icon_label.setToolTip(tooltip or "此设备尚未测试。")
@@ -596,18 +604,17 @@ class TesterDialog(QDialog):
         if error_msg: config['error_msg'] = error_msg
         else: config.pop('error_msg', None)
         
-        # 注意：这里不再调用 _save_and_refresh，因为它会触发重绘，可能导致循环。
-        # 状态的保存将由触发此更新的操作（如测试、禁用/启用）来负责。
-        self._save_config_only() # 创建一个只保存配置，不刷新UI的方法
+        self._save_config_only()
 
     def _save_config_only(self):
-        """[v3.5 新增] 只保存插件的设备配置到文件，不刷新任何UI。"""
+        """只保存插件的设备配置到文件，不刷新任何UI。"""
         try:
             with open(self.plugin.config_path, 'w', encoding='utf-8') as f:
                 json.dump(self.plugin.device_config, f, indent=4)
         except Exception as e:
             # 在这种静默保存中，我们只在控制台打印错误
             print(f"错误: 无法静默保存设备配置: {e}")
+            
     def _reset_volume_bar(self, device_id):
         """将指定设备的音量条安全地重置为零。"""
         if device_id in self.device_widgets:
@@ -621,7 +628,6 @@ class TesterDialog(QDialog):
         # 如果没有选中任何设备，禁用所有相关按钮
         if not current:
             self.record_btn.setEnabled(False)
-            self.set_default_btn.setEnabled(False)
             self.playback_btn.setEnabled(False)
             return
 
@@ -632,28 +638,34 @@ class TesterDialog(QDialog):
             # 检查设备在配置文件中是否被标记为禁用
             is_disabled = self.plugin.device_config.get(device_id, {}).get("disabled", False)
             
-            # 即使设备被禁用，也允许选中，但与录制、设置默认相关的按钮会被禁用
+            # 录制按钮的启用状态取决于是否禁用和是否正在录制
             self.record_btn.setEnabled(not is_disabled)
-            self.set_default_btn.setEnabled(not is_disabled)
+            # 如果是当前选中的设备，且正在录制，则按钮文本设为停止
+            if self.is_recording_sample and self.recording_worker and self.recording_worker.device_info['index'] == device_info['index']:
+                self.record_btn.setText("停止录制")
+                self.record_btn.setIcon(self.status_icons.get("stop"))
+            else:
+                self.record_btn.setText("开始录制样本")
+                self.record_btn.setIcon(self.status_icons.get("record"))
 
-        # 每次切换设备都重置回放按钮的状态，因为录音样本是设备绑定的
-        self.playback_btn.setEnabled(False)
+            # 回放按钮的状态取决于是否有录制样本 (filepath的存在)
+            if self.recorded_sample and os.path.exists(self.sample_filepath):
+                self.playback_btn.setEnabled(True)
+            else:
+                self.playback_btn.setEnabled(False)
+
     def on_item_double_clicked(self, item):
         """
-        [v3.6 修复] 当用户双击设备项时，在Windows上打开系统的声音录制设备设置。
-        使用 os.system() 以确保命令行参数被正确解析。
+        当用户双击设备项时，在Windows上打开系统的声音录制设备设置。
         """
         if sys.platform != "win32":
-            return
+            return # 目前只支持Windows
 
         try:
-            # --- [核心修复] ---
             # 使用 os.system() 将整个命令作为一个字符串传递给系统命令解释器。
-            # 这能最可靠地模拟用户在“运行”中输入命令的行为。
-            # 'start' 命令会以非阻塞方式打开控制面板。
-            command = 'start control.exe mmsys.cpl,,1'
+            # 'start' 命令会直接打开声音设置的“录制”标签页
+            command = 'start control.exe mmsys.cpl,,1' 
             os.system(command)
-            # --- [修复结束] ---
             
         except Exception as e:
             QMessageBox.warning(self, "操作失败", f"无法打开系统声音设置:\n{e}")
@@ -665,10 +677,13 @@ class TesterDialog(QDialog):
         self.stop_all_tests() # 确保之前的所有测试已停止
         
         # 清除所有设备的状态图标和样式，准备重新测试
-        for info in self.device_widgets.values():
+        for dev_id, info in self.device_widgets.items():
             info['label'].setStyleSheet("") # 清除变灰样式
             info['status_icon'].clear() # 清除图标
-            self.update_status_icon(self.devices[info['item'].listWidget().row(info['item'])]['index'], "untested", error_msg=None)
+            # 确保将 config 中的 status 重置为 "untested"
+            self.plugin.device_config.setdefault(str(dev_id), {})['status'] = "untested"
+            # 刷新列表项的 Tooltip，因为 update_status_icon 在没有 status 时会设为“未测试”
+            self.update_status_icon(dev_id, "untested") 
 
         # 筛选出未被禁用的设备进行测试
         devices_to_test = [dev for dev in self.devices if not self.plugin.device_config.get(str(dev['index']), {}).get("disabled", False)]
@@ -678,15 +693,18 @@ class TesterDialog(QDialog):
             return
         
         # 创建并启动 TestWorker 线程
-        worker = TestWorker(devices_to_test)
+        worker = TestWorker(devices_to_test, duration=5) # 传入 duration=5 参数
         self.active_test_workers['all'] = worker # 存储工作线程引用
         
-        # 连接信号
-        worker.volume_update.connect(self.update_volume_bar)
-        worker.device_error.connect(self.mark_device_as_error) # 标记设备打开失败
-        worker.device_disable_request.connect(lambda dev_id: self.toggle_disable_device(str(dev_id), True)) # 自动禁用无效设备
-        worker.test_finished.connect(self.on_test_finished) # 所有设备测试完成
+        worker.volume_update.connect(self.process_volume_data) 
+        worker.device_error.connect(self.mark_device_as_error) 
+        worker.device_disable_request.connect(lambda dev_id: self.toggle_disable_device(str(dev_id), True)) 
+        worker.test_finished.connect(self.on_test_finished) 
         
+        # 启动音量计UI更新定时器
+        if not self.volume_update_timer.isActive():
+            self.volume_update_timer.start(50) 
+
         worker.start() # 启动线程
 
         # 更新UI按钮状态
@@ -719,13 +737,60 @@ class TesterDialog(QDialog):
         # 恢复UI按钮状态
         self.test_all_btn.setEnabled(True)
         self.stop_all_btn.setEnabled(False)
+        # 停止音量计UI更新定时器
+        self.volume_update_timer.stop()
 
-    def update_volume_bar(self, device_index, volume):
+    def process_volume_data(self, device_id, data_chunk):
         """
-        实时更新指定设备的音量条显示。
+        接收来自后台线程的原始音频数据，并将其放入对应设备的队列中。
         """
-        if device_index in self.device_widgets:
-            self.device_widgets[device_index]['bar'].setValue(int(volume))
+        if device_id not in self.volume_meter_queues:
+            self.volume_meter_queues[device_id] = queue.Queue(maxsize=5) # 队列大小5
+        
+        try:
+            # 使用非阻塞方式放入，如果队列已满则丢弃旧数据（保证实时性）
+            if self.volume_meter_queues[device_id].full():
+                self.volume_meter_queues[device_id].get_nowait() # 丢弃最旧的
+            self.volume_meter_queues[device_id].put_nowait(data_chunk)
+        except queue.Full:
+            pass # 队列满时不做额外处理
+
+    def update_all_volume_meters(self):
+        """
+        由QTimer触发，遍历所有设备，计算并平滑更新它们的音量条。
+        """
+        for device_id, widgets in self.device_widgets.items():
+            q = self.volume_meter_queues.get(device_id)
+            history = self.volume_histories.setdefault(device_id, deque(maxlen=5)) # 历史记录 deque 大小5
+            
+            raw_target_value = 0
+            if q and not q.empty():
+                try:
+                    data_chunk = q.get_nowait()
+                    if data_chunk is not None and data_chunk.any(): # 确保数据块不为空
+                        rms = np.linalg.norm(data_chunk) / np.sqrt(len(data_chunk)) # 计算RMS
+                        dbfs = 20 * np.log10(rms + 1e-9) # 转换为dBFS，加小量避免log(0)
+                        # 将 -60dBFS 到 0dBFS 的范围映射到 0-100 的进度条值
+                        raw_target_value = max(0, min(100, (dbfs + 60) * (100 / 60)))
+                except queue.Empty:
+                    raw_target_value = 0 # 队列空，音量为0
+                except Exception as e:
+                    print(f"Error calculating volume for device {device_id}: {e}")
+                    raw_target_value = 0
+            
+            # 平滑处理：将当前原始目标值添加到历史记录，并计算平均值
+            history.append(raw_target_value)
+            smoothed_target_value = sum(history) / len(history)
+
+            current_value = widgets['bar'].value()
+            smoothing_factor = 0.4 # UI插值平滑因子
+            new_value = int(current_value * (1 - smoothing_factor) + smoothed_target_value * smoothing_factor)
+            
+            # 如果当前值与平滑目标值非常接近，直接设为平滑目标值，避免微小抖动
+            if abs(new_value - smoothed_target_value) < 2:
+                new_value = int(smoothed_target_value)
+            
+            widgets['bar'].setValue(new_value)
 
     def mark_device_as_error(self, device_id, error_msg):
         """
@@ -736,11 +801,18 @@ class TesterDialog(QDialog):
 
     def record_sample(self):
         """
-        为当前选中的设备录制一段3秒的音频样本。
-        录制前会停止所有并行测试，录制完成后会启动后台分析。
+        控制样本录制的开始和停止。
         """
+        # 如果当前正在录制，则停止它
+        if self.is_recording_sample:
+            if self.recording_worker and self.recording_worker.isRunning():
+                self.recording_worker.stop() # 请求停止线程
+            # UI状态的恢复将在 on_sample_recorded 中处理
+            return
+
+        # 如果当前未在录制，则开始录制
         current_item = self.device_list_widget.currentItem()
-        if not current_item: return # 确保有选中项
+        if not current_item: return
         
         # 在开始录制样本前，必须先停止所有并行的监听流，以释放设备
         self.stop_all_tests()
@@ -748,28 +820,48 @@ class TesterDialog(QDialog):
         row = self.device_list_widget.row(current_item)
         device_info = self.devices[row] # 获取选中设备的详细信息
         
-        # 更新UI，显示录制状态
-        self.record_btn.setText("录制中...")
-        self.record_btn.setEnabled(False)
+        # 更新UI，进入录制状态
+        self.is_recording_sample = True
+        self.record_btn.setText("停止录制")
+        self.record_btn.setIcon(self.status_icons.get("stop")) # 使用停止图标
         self.playback_btn.setEnabled(False) # 录制过程中禁用回放
+        self.test_all_btn.setEnabled(False) # 录制时禁用全局测试
         
-        # 创建并启动 RecordingWorker 线程
         self.recording_worker = RecordingWorker(device_info, self.sample_filepath)
         self.recording_worker.recording_finished.connect(self.on_sample_recorded) # 连接录制完成信号
-        self.recording_worker.volume_update.connect(self.update_volume_bar) # 连接音量更新信号
+        self.recording_worker.volume_update.connect(self.process_volume_data) 
+        
+        # 启动音量计UI更新定时器
+        if not self.volume_update_timer.isActive():
+            self.volume_update_timer.start(50)
+            
         self.recording_worker.start()
 
     def on_sample_recorded(self, success, result_or_path):
         """
-        样本录制完成后调用的槽函数。
-        如果录制成功，则启动后台分析以验证样本。如果失败，则直接报告错误。
+        样本录制完成后（无论是成功还是失败）调用的槽函数。
         """
-        self.record_btn.setText("录制3秒样本")
-        self.record_btn.setEnabled(True) # 恢复录制按钮状态
+        # 恢复UI状态
+        self.is_recording_sample = False
+        self.record_btn.setText("开始录制样本") # 恢复录制按钮文本
+        self.record_btn.setIcon(self.status_icons.get("record")) # 恢复录制图标
+        self.test_all_btn.setEnabled(True) # 恢复全局测试按钮状态
+        # 只有在有选中项且未被禁用时才启用录制按钮
+        current_item = self.device_list_widget.currentItem()
+        if current_item:
+            row = self.device_list_widget.row(current_item)
+            device_id_str = str(self.devices[row]['index'])
+            is_disabled = self.plugin.device_config.get(device_id_str, {}).get("disabled", False)
+            self.record_btn.setEnabled(not is_disabled)
+        else:
+            self.record_btn.setEnabled(False)
         
+        # 停止音量计UI更新定时器
+        self.volume_update_timer.stop()
+
         row = self.device_list_widget.currentRow()
         if row == -1: return # 避免在无选中行时出错
-        device_id = self.devices[row]['index'] # 获取设备ID
+        device_id = self.devices[row]['index']
 
         self._reset_volume_bar(device_id) # 无论成功与否，录制结束后都将对应音量条清零
 
@@ -777,13 +869,14 @@ class TesterDialog(QDialog):
             self.playback_btn.setEnabled(True) # 成功录制后启用回放按钮
             
             # 录制成功，现在启动后台分析任务来验证录音内容
-            filepath = result_or_path
-            analysis_worker = SampleAnalysisWorker(device_id, filepath)
+            self.recorded_sample = result_or_path # 记录录制样本的路径
+            analysis_worker = SampleAnalysisWorker(device_id, self.recorded_sample)
             analysis_worker.signals.analysis_finished.connect(self.on_sample_analysis_finished) # 连接分析完成信号
             self.analysis_thread_pool.start(analysis_worker) # 启动分析线程
         else:
             # 录制过程本身就失败了
             self.playback_btn.setEnabled(False)
+            self.recorded_sample = None # 清空已录制样本的引用
             error_msg = result_or_path
             QMessageBox.critical(self, "录制失败", f"无法录制样本:\n{error_msg}")
             self.update_status_icon(device_id, "error", error_msg) # 更新状态为错误
@@ -793,19 +886,21 @@ class TesterDialog(QDialog):
         样本分析完成后调用的槽函数。
         根据分析结果更新设备的最终状态图标和工具提示。
         """
+        # 如果分析成功（has_signal），不直接设为verified，而是等待用户确认
         if new_status == "no_signal":
             self.update_status_icon(device_id, "no_signal")
             QMessageBox.warning(self, "验证失败", "录制的样本中未检测到有效声音信号。请检查麦克风或输入音量。")
         elif new_status == "error":
             self.update_status_icon(device_id, "error", "样本文件分析失败。")
-        else: # verified (有信号)
-            self.update_status_icon(device_id, "verified")
+        elif new_status == "has_signal": # 分析出信号，但还未用户确认
+            self.update_status_icon(device_id, "has_signal") # 暂时标记为检测到信号
+            # 此时不做其他动作，等待用户点击回放后进行确认
 
     def playback_sample(self):
         """
         播放最近录制的音频样本。
         """
-        if not os.path.exists(self.sample_filepath):
+        if not self.recorded_sample or not os.path.exists(self.sample_filepath):
             QMessageBox.warning(self, "无样本", "没有可供回放的录音样本。")
             return
             
@@ -819,14 +914,35 @@ class TesterDialog(QDialog):
         self.playback_worker.start()
 
     def on_playback_finished(self):
-        """播放完成后恢复回放按钮状态。"""
+        """播放完成后恢复回放按钮状态，并弹出确认对话框。"""
         self.playback_btn.setText("回放样本")
         self.playback_btn.setEnabled(True)
+
+        # 弹出确认对话框，询问用户是否听到清晰声音
+        current_item = self.device_list_widget.currentItem()
+        if not current_item: return # 确保有选中设备
+        row = self.device_list_widget.row(current_item)
+        device_id = self.devices[row]['index']
+
+        reply = QMessageBox.question(
+            self,
+            "确认设备可用性",
+            "您是否能清晰地听到刚才录制的声音？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes # 默认选中“是”
+        )
+
+        if reply == QMessageBox.Yes:
+            self.update_status_icon(device_id, "verified") # 用户确认，标记为“已验证”
+            QMessageBox.information(self, "已确认", "设备已标记为‘已验证’。")
+        else:
+            self.update_status_icon(device_id, "no_signal") # 用户确认有问题，标记为“无信号”
+            QMessageBox.warning(self, "请检查", "设备已标记为‘无信号’。请检查麦克风或音量。")
 
     def on_playback_error(self, error_msg):
         """播放出错时显示错误信息并恢复回放按钮。"""
         QMessageBox.critical(self, "回放失败", f"无法回放样本:\n{error_msg}")
-        self.on_playback_finished() # 调用通用恢复逻辑
+        self.on_playback_finished() # 调用通用恢复逻辑 (会弹出确认框)
     
     def set_as_default(self):
         """
@@ -894,6 +1010,13 @@ class TesterDialog(QDialog):
         # “重命名”选项
         menu.addAction(self.icon_manager.get_icon("rename"), "重命名...", lambda: self.rename_device(device_id, device_info))
         
+        # “设为默认”选项
+        set_default_action = menu.addAction(self.icon_manager.get_icon("check"), "设为程序默认设备")
+        set_default_action.setEnabled(not is_disabled) # 只有启用的设备才能设为默认
+        set_default_action.triggered.connect(self.set_as_default) # 连接到现有的 set_as_default 方法
+        
+        menu.addSeparator() # 在禁用/启用前加分隔线
+
         # “禁用/启用”选项
         if is_disabled:
             menu.addAction(self.status_icons.get("unlock"), "启用此设备", lambda: self.toggle_disable_device(device_id, False))
@@ -904,21 +1027,22 @@ class TesterDialog(QDialog):
 
     def start_single_test(self, device_info):
         """
-        [v3.1 修复] 开始对单个设备的实时监听测试。
+        开始对单个设备的实时监听测试。
         """
         device_id_str = str(device_info['index'])
         self.stop_single_test(device_id_str) # 确保之前的已停止
         
-        worker = TestWorker([device_info])
+        worker = TestWorker([device_info]) # 不传入 duration 参数，使其无限期运行
         self.active_test_workers[device_id_str] = worker
         
-        # --- [核心修复] ---
-        # 确保为单独测试也连接 test_finished 信号，以便在测试结束后更新状态
-        worker.volume_update.connect(self.update_volume_bar)
+        worker.volume_update.connect(self.process_volume_data) 
         worker.device_error.connect(self.mark_device_as_error)
-        worker.test_finished.connect(self.on_test_finished) # <--- 新增的连接
-        # --- [修复结束] ---
+        worker.test_finished.connect(self.on_test_finished) # 确保为单独测试也连接 test_finished 信号
         
+        # 启动音量计UI更新定时器
+        if not self.volume_update_timer.isActive():
+            self.volume_update_timer.start(50)
+
         worker.start()
 
     def stop_single_test(self, device_id):
@@ -956,7 +1080,7 @@ class TesterDialog(QDialog):
         self._save_and_refresh() # 保存配置并刷新UI
 
     def _save_and_refresh(self, refresh_ui=True):
-        """[v3.5 修复] 保存配置，并根据需要刷新UI。"""
+        """保存配置，并根据需要刷新UI。"""
         self._save_config_only() # 先调用只保存的方法
         
         if refresh_ui:
@@ -973,8 +1097,10 @@ class TesterDialog(QDialog):
         """
         self.stop_all_tests() # 停止所有并行测试
         # 停止所有可能仍在运行的单个设备测试线程
-        for worker in list(self.active_test_workers.values()):
-            worker.stop(); worker.quit(); worker.wait()
+        # 确保遍历的是拷贝，因为 pop 会修改字典
+        for worker_id in list(self.active_test_workers.keys()):
+            worker = self.active_test_workers.pop(worker_id) # 从活跃列表中移除
+            worker.stop(); worker.quit(); worker.wait() # 停止线程并等待结束
         
         # 清理临时录音文件
         if os.path.exists(self.sample_filepath):
