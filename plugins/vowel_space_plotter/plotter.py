@@ -1615,28 +1615,37 @@ class PlotterDialog(QDialog):
     
     def load_dataframe(self, df, source_name="来自音频分析模块"):
         """
+        [v2 - 已修复]
         从外部（如音频分析模块）加载 DataFrame，并将其作为新的图层添加到绘图器中。
+        此版本修复了 UnboundLocalError，并能正确使用传入的 source_name。
         """
         if df is None or df.empty:
             QMessageBox.warning(self, "加载失败", "传入的 DataFrame 为空或无效。")
             return
         
-        # 自动生成图层名称
-        layer_name = f"{source_name} - {len(self.layers) + 1}"
+        # --- [核心修复] ---
+        # 步骤 1: 先计算出唯一的图层名称
+        base_name = source_name if source_name else "新数据"
+        layer_name = base_name
+        counter = 1
+        # 循环检查，直到找到一个不重复的名称
+        while any(layer['name'] == layer_name for layer in self.layers):
+            layer_name = f"{base_name} ({counter})"
+            counter += 1
         
-        # 创建一个新的图层配置，并尝试自动填充列名和默认样式
+        # 步骤 2: 使用上一步计算出的唯一名称来创建完整的配置字典
         new_layer_config = {
-            "name": layer_name,
+            "name": layer_name, # 使用唯一的名称
             "df": df,
-            "tg": None, # 初始无TextGrid
+            "tg": None,
             "data_filename": f"{source_name} (实时数据)",
             "tg_filename": "未选择 (可选)",
-            "f1_col": "", # 待自动检测或用户选择
-            "f2_col": "", # 待自动检测或用户选择
-            "group_col": "无分组", # 初始无分组
-            "enabled": True, # 默认启用
-            "locked": False, # 默认未锁定
-            # 默认样式设置（与_populate_layer_settings_panel的默认值保持一致）
+            "f1_col": "",
+            "f2_col": "",
+            "group_col": "无分组",
+            "enabled": True,
+            "locked": False,
+            # 默认样式设置
             "point_size": 15,
             "point_alpha": 0.3,
             "marker": "圆点", 
@@ -1647,10 +1656,12 @@ class PlotterDialog(QDialog):
             "ellipse_std": "2 (95%)",
             "ellipse_style": "实线",
             "ellipse_width": 2,
-            "color_scheme": "默认", # 默认颜色方案
-            "groups": {} # 初始为空，populate时填充
+            "color_scheme": "默认",
+            "groups": {}
         }
 
+        # --- 后续的自动检测和UI更新逻辑保持不变 ---
+        
         # 尝试自动选择F1/F2列
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         f1_auto = next((c for c in numeric_cols if 'f1' in c.lower()), numeric_cols[0] if numeric_cols else "")
@@ -1708,19 +1719,26 @@ class VowelSpacePlotterPlugin(BasePlugin):
         print("[Vowel Plotter] Plugin has been torn down.")
 
     def execute(self, **kwargs):
-        """插件执行入口点。当用户从插件菜单点击或从其他模块调用时触发。"""
+        """
+        [v2 - 已修复]
+        插件执行入口点。此版本修复了 source_name 未被传递的问题。
+        """
         # 实现单例模式：如果对话框已存在则显示，否则创建新的
         if self.plotter_dialog is None:
             self.plotter_dialog = PlotterDialog(parent=self.main_window, icon_manager=getattr(self.main_window, 'icon_manager', None))
-            # 连接对话框的 finished 信号，当对话框关闭时清除引用
             self.plotter_dialog.finished.connect(self._on_dialog_finished)
         
-        # 检查是否有 DataFrame 参数传入，如果有则加载为新图层
+        # --- [核心修复] ---
+        # 1. 从 kwargs 中提取 dataframe 和 source_name
         dataframe_to_load = kwargs.get('dataframe')
-        if dataframe_to_load is not None:
-            self.plotter_dialog.load_dataframe(dataframe_to_load)
+        source_name = kwargs.get('source_name') # 如果不存在，会是 None
 
-        # 显示对话框并将其置于顶层，确保用户能看到它
+        # 2. 检查是否有 DataFrame 参数传入
+        if dataframe_to_load is not None:
+            # 3. 将 dataframe 和 source_name 一起传递给对话框
+            self.plotter_dialog.load_dataframe(dataframe_to_load, source_name)
+
+        # 显示对话框并将其置于顶层
         self.plotter_dialog.show()
         self.plotter_dialog.raise_()
         self.plotter_dialog.activateWindow()

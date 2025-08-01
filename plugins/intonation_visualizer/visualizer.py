@@ -1668,7 +1668,7 @@ class IntonationVisualizerPlugin(BasePlugin):
         # 检查是否有DataFrame传入，如果有，则调用新的数据添加方法
         dataframe_to_load = kwargs.get('dataframe')
         if dataframe_to_load is not None:
-            source_name = kwargs.get('source_name', '来自音频分析模块') # 默认来源
+            source_name = kwargs.get('source_name')
             self.visualizer_dialog.add_data_source(dataframe_to_load, source_name)
 
         # 显示窗口
@@ -1743,7 +1743,10 @@ class IntonationVisualizerPlugin(BasePlugin):
         print("[Intonation Visualizer] Plugin has been torn down.")
 
     def execute(self, **kwargs):
-        """插件的统一入口，负责显示窗口并加载数据。"""
+        """
+        [v2 - 已修复]
+        插件的统一入口。此版本修复了 source_name 未被正确处理的问题。
+        """
         # 如果窗口不存在，则创建
         if self.visualizer_dialog is None:
             parent = self.main_window if hasattr(self, 'main_window') else None
@@ -1751,10 +1754,14 @@ class IntonationVisualizerPlugin(BasePlugin):
             self.visualizer_dialog = VisualizerDialog(parent=parent, icon_manager=icon_manager)
             self.visualizer_dialog.finished.connect(self._on_dialog_finished)
 
-        # 检查是否有DataFrame参数传入，如果有，则调用新的数据添加方法
+        # --- [核心修复] ---
+        # 1. 从 kwargs 中提取 dataframe 和 source_name
         dataframe_to_load = kwargs.get('dataframe')
+        source_name = kwargs.get('source_name') # 如果不存在，会是 None
+
+        # 2. 检查是否有DataFrame参数传入
         if dataframe_to_load is not None:
-            source_name = kwargs.get('source_name', '来自音频分析模块') # 默认来源
+            # 3. 将 dataframe 和 source_name 一起传递给对话框
             self.visualizer_dialog.add_data_source(dataframe_to_load, source_name)
 
         # 显示窗口
