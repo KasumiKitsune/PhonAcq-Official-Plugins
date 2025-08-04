@@ -7,7 +7,7 @@ import re
 import numpy as np
 from datetime import datetime
 import tempfile
-
+import zipfile
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
                              QSplitter, QMessageBox, QFileDialog, QTableWidget,
                              QTableWidgetItem, QHeaderView, QGroupBox, QFormLayout,
@@ -299,25 +299,102 @@ class SplitterDialog(QDialog):
             progress.close()
             self.analyze_and_preview()
 
-    def load_wordlist_from_path(self, filepath):
-        if filepath and os.path.exists(filepath):
-            self.wordlist_path = filepath
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f: data = json.load(f)
-                if data.get("meta", {}).get("format") != "standard_wordlist": raise ValueError("不是有效的'standard_wordlist'格式。")
-                self.word_list = [item.get("text", "") for group in data.get("groups", []) for item in group.get("items", [])]
-                self.wordlist_label.setText(f"{os.path.basename(filepath)} ({len(self.word_list)}个词)"); self.log(f"已加载词表 '{os.path.basename(filepath)}'，包含 {len(self.word_list)} 个词。")
-                self.copy_for_tts_btn.setEnabled(True) # 启用按钮
+    def _load_fdeck_for_splitting(self, filepath):
+        """
+        [新增] 从 .fdeck 卡组包中加载单词列表以用于分割。
+        """
+        try:
+            with zipfile.ZipFile(filepath, 'r') as zf:
+                if 'manifest.json' not in zf.namelist():
+                    raise ValueError("卡组包内缺少 manifest.json 文件。")
                 
-                wordlist_name_no_ext = os.path.splitext(os.path.basename(filepath))[0]
-                default_output_dir = os.path.join(self.parent_window.BASE_PATH, "audio_tts", wordlist_name_no_ext)
-                self.output_dir_input.setText(default_output_dir.replace("\\", "/"))
+                with zf.open('manifest.json') as manifest_file:
+                    manifest_data = json.load(manifest_file)
 
-                self.analyze_and_preview()
-            except Exception as e:
-                self.wordlist_path, self.word_list = None, []; self.wordlist_label.setText("加载失败")
-                self.copy_for_tts_btn.setEnabled(False) # 失败时禁用按钮
-                QMessageBox.critical(self, "词表错误", f"无法加载或解析词表文件:\n{e}")
+            # 从 manifest.json 的 cards 列表中提取所有 id
+            self.word_list = [
+                card.get("id") for card in manifest_data.get("cards", [])
+                if card.get("id") # 确保 id 存在且不为空
+            ]
+            
+            if not self.word_list:
+                raise ValueError("卡组中没有找到任何有效的卡片ID。")
+
+            # 更新UI和内部状态
+            self.wordlist_path = filepath
+            filename = os.path.basename(filepath)
+            deck_name = manifest_data.get("meta", {}).get("deck_name", filename) # 优先使用卡组名
+            
+            self.wordlist_label.setText(f"{deck_name} ({len(self.word_list)}个词)")
+            self.log(f"已加载速记卡组 '{deck_name}'，包含 {len(self.word_list)} 个词条。")
+            self.copy_for_tts_btn.setEnabled(True)
+            
+            # 自动设置默认输出目录
+            wordlist_name_no_ext = os.path.splitext(filename)[0]
+            # [修改] 输出目录现在指向 flashcards/audio/ 目录，更符合逻辑
+            default_output_dir = os.path.join(self.parent_window.BASE_PATH, "flashcards", "audio", wordlist_name_no_ext)
+            self.output_dir_input.setText(default_output_dir.replace("\\", "/"))
+
+            self.analyze_and_preview()
+
+        except Exception as e:
+            self.wordlist_path, self.word_list = None, []
+            self.wordlist_label.setText("加载失败")
+            self.copy_for_tts_btn.setEnabled(False)
+            QMessageBox.critical(self, "卡组加载错误", f"无法加载或解析 .fdeck 卡组文件:\n{e}")
+
+    def load_wordlist_from_path(self, filepath):
+        """
+        [重构] 根据文件类型加载词表 (.json 或 .fdeck)。
+        """
+        if not filepath or not os.path.exists(filepath):
+            return
+
+        # --- 调度中心 ---
+        if filepath.endswith('.fdeck'):
+            self._load_fdeck_for_splitting(filepath)
+        elif filepath.endswith('.json'):
+            self._load_standard_json_wordlist(filepath)
+        else:
+            QMessageBox.warning(self, "文件类型不支持", "请选择一个有效的 .json 词表或 .fdeck 速记卡组文件。")
+
+    def _load_standard_json_wordlist(self, filepath):
+        """
+        [新增] 处理旧的 standard_wordlist.json 格式。
+        这是从旧的 load_wordlist_from_path 中抽离出的逻辑。
+        """
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data.get("meta", {}).get("format") != "standard_wordlist":
+                raise ValueError("不是有效的'standard_wordlist'格式。")
+            
+            self.word_list = [
+                item.get("text", "") for group in data.get("groups", []) 
+                for item in group.get("items", []) if item.get("text")
+            ]
+            
+            if not self.word_list:
+                raise ValueError("词表中没有找到任何有效的词条。")
+
+            self.wordlist_path = filepath
+            filename = os.path.basename(filepath)
+            self.wordlist_label.setText(f"{filename} ({len(self.word_list)}个词)")
+            self.log(f"已加载词表 '{filename}'，包含 {len(self.word_list)} 个词。")
+            self.copy_for_tts_btn.setEnabled(True)
+            
+            # 自动设置默认输出目录
+            wordlist_name_no_ext = os.path.splitext(filename)[0]
+            default_output_dir = os.path.join(self.parent_window.BASE_PATH, "audio_tts", wordlist_name_no_ext)
+            self.output_dir_input.setText(default_output_dir.replace("\\", "/"))
+
+            self.analyze_and_preview()
+
+        except Exception as e:
+            self.wordlist_path, self.word_list = None, []
+            self.wordlist_label.setText("加载失败")
+            self.copy_for_tts_btn.setEnabled(False)
+            QMessageBox.critical(self, "词表错误", f"无法加载或解析 .json 词表文件:\n{e}")
 
     def copy_list_for_tts(self):
         """将当前词表转换为逗号分隔的字符串并复制到剪贴板。"""
@@ -342,7 +419,14 @@ class SplitterDialog(QDialog):
             QMessageBox.critical(self, "复制失败", f"无法将内容复制到剪贴板:\n{e}")
 
     def select_wordlist_file(self):
-        filepath, _ = QFileDialog.getOpenFileName(self, "选择JSON词表文件", os.path.join(self.parent_window.BASE_PATH, "word_lists"), "JSON 文件 (*.json)"); self.load_wordlist_from_path(filepath)
+        # [核心修改] 允许用户选择 .json 和 .fdeck 文件
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, 
+            "选择词表或速记卡组", 
+            self.parent_window.BASE_PATH, # 从项目根目录开始，方便选择 word_lists 或 flashcards
+            "支持的文件 (*.json *.fdeck)"
+        )
+        self.load_wordlist_from_path(filepath)
 
     def on_param_changed(self):
         self.threshold_label.setText(f"{self.threshold_slider.value()} dB"); self.analyze_and_preview()
@@ -411,13 +495,45 @@ class SplitterDialog(QDialog):
             self.delete_selected_segments()
 
     def play_segment(self, row):
-        if not (0 <= row < len(self.split_points)): return
-        start, end = self.split_points[row]; segment_data = self.audio_data[start:end]
+        if not (0 <= row < len(self.split_points)) or self.audio_data is None:
+            return
+
+        # --- [核心修复] ---
+        # 在播放前，也读取并应用UI上的“分割点偏移”值，
+        # 确保试听效果与最终保存的文件一致。
         try:
-            if self.temp_audio_file and os.path.exists(self.temp_audio_file): os.remove(self.temp_audio_file)
-            fd, self.temp_audio_file = tempfile.mkstemp(suffix=".wav"); os.close(fd)
-            sf.write(self.temp_audio_file, segment_data, self.audio_sr); self.player.setMedia(QMediaContent(QUrl.fromLocalFile(self.temp_audio_file))); self.player.play()
-        except Exception as e: self.log(f"试听失败: {e}")
+            # 从UI输入框获取偏移值（毫秒）
+            offset_ms = int(self.offset_input.text())
+            # 将毫秒转换为采样点数
+            offset_samples = int(offset_ms / 1000 * self.audio_sr)
+        except (ValueError, TypeError):
+            # 如果输入框为空或无效，则默认偏移为0
+            offset_samples = 0
+
+        # 获取原始的分割点
+        start_raw, end_raw = self.split_points[row]
+
+        # 应用偏移量，并确保不超出音频边界
+        # 这个逻辑与 run_processing 函数中的完全相同
+        start = max(0, start_raw - offset_samples)
+        end = min(len(self.audio_data), end_raw + offset_samples)
+        
+        # 使用调整后的分割点来截取音频片段
+        segment_data = self.audio_data[start:end]
+        # --- [修复结束] ---
+
+        try:
+            if self.temp_audio_file and os.path.exists(self.temp_audio_file):
+                os.remove(self.temp_audio_file)
+            
+            fd, self.temp_audio_file = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            
+            sf.write(self.temp_audio_file, segment_data, self.audio_sr)
+            self.player.setMedia(QMediaContent(QUrl.fromLocalFile(self.temp_audio_file)))
+            self.player.play()
+        except Exception as e:
+            self.log(f"试听失败: {e}")
 
     def delete_selected_segments(self):
         selected_rows = sorted([index.row() for index in self.preview_table.selectionModel().selectedRows()], reverse=True)

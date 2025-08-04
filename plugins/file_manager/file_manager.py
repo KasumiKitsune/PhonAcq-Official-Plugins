@@ -8,13 +8,14 @@ import textwrap
 import pathlib
 from datetime import datetime, timedelta
 import subprocess
+import uuid
 
 # PyQt5 核心模块导入
 from PyQt5.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem,
                              QMessageBox, QSplitter, QLabel, QMenu, QHeaderView, QLineEdit,
                              QTreeWidgetItemIterator, QApplication, QShortcut, QFormLayout,
-                             QSlider, QDialogButtonBox, QCheckBox, QGroupBox)
+                             QSlider, QDialogButtonBox, QCheckBox, QGroupBox, QInputDialog, QAbstractItemView)
 from PyQt5.QtCore import Qt, QSize, QBuffer, QByteArray, QObject, QEvent, QTimer # QBuffer, QByteArray 用于图片Base64编码
 from PyQt5.QtGui import QIcon, QKeySequence, QPixmap, QPainter, QColor, QPen # QPixmap 用于图片处理，QKeySequence 用于快捷键
 try:
@@ -389,6 +390,10 @@ class FileManagerPlugin(BasePlugin):
     def __init__(self, main_window, plugin_manager):
         super().__init__(main_window, plugin_manager)
         self.dialog = None # 存储对话框实例，实现单例模式
+        
+        # [核心修正] 预先计算并存储回收站的相关路径，供API方法使用
+        self.trash_path = os.path.join(BASE_PATH, ".trash")
+        self.trash_metadata_path = os.path.join(self.trash_path, ".metadata.json")
 
     def setup(self):
         """插件启用时调用。对于独立窗口插件，通常只需返回 True。"""
@@ -420,6 +425,69 @@ class FileManagerPlugin(BasePlugin):
         """当对话框关闭时，清除对话框实例的引用，以便下次可以重新创建。"""
         self.dialog = None
 
+    # [核心新增] 公共API，供其他模块调用
+    def move_to_trash(self, paths_to_delete):
+        """
+        一个安全的、无UI的公共API，用于将文件或文件夹移动到插件管理的回收站。
+        v1.1: 采用 '文件名_时间戳.ext' 的命名格式。
+        """
+        if not isinstance(paths_to_delete, list):
+            paths_to_delete = [paths_to_delete]
+
+        try:
+            os.makedirs(self.trash_path, exist_ok=True)
+            metadata = self._load_trash_metadata()
+            
+            for path in paths_to_delete:
+                if not os.path.exists(path):
+                    continue
+                
+                # --- [核心] 使用新的、后缀式的命名逻辑 ---
+                original_basename, original_ext = os.path.splitext(os.path.basename(path))
+                timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+                trash_name = f"{original_basename}_{timestamp}{original_ext}"
+                
+                # 处理极低概率的重名冲突
+                counter = 1
+                final_trash_name = trash_name
+                while os.path.exists(os.path.join(self.trash_path, final_trash_name)):
+                    final_trash_name = f"{original_basename}_{timestamp}_{counter}{original_ext}"
+                    counter += 1
+                
+                destination = os.path.join(self.trash_path, final_trash_name)
+                shutil.move(path, destination)
+                
+                # 记录元数据
+                metadata[final_trash_name] = {
+                    "original_path": path,
+                    "deleted_time": datetime.now().isoformat()
+                }
+
+            self._save_trash_metadata(metadata)
+            return True, f"成功将 {len(paths_to_delete)} 个项目移动到回收站。"
+
+        except Exception as e:
+            error_message = f"移动到回收站时出错: {e}"
+            print(f"[File Manager API] {error_message}", file=sys.stderr)
+            return False, error_message
+
+    # [核心新增] 为API服务的辅助方法 (从FileManagerDialog中复制并适配)
+    def _load_trash_metadata(self):
+        if not os.path.exists(self.trash_metadata_path):
+            return {}
+        try:
+            with open(self.trash_metadata_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+
+    def _save_trash_metadata(self, metadata):
+        try:
+            with open(self.trash_metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=4)
+        except IOError as e:
+            print(f"[File Manager API] 错误: 无法保存回收站元数据: {e}")
+
 class KeyNavigationFilter(QObject):
     def __init__(self, dialog, parent=None):
         super().__init__(parent)
@@ -429,11 +497,19 @@ class KeyNavigationFilter(QObject):
         if event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
                 if obj is self.dialog.file_view:
-                    # 在右侧文件列表按Enter，模拟双击
-                    selected = self.dialog.file_view.selectedItems()
-                    if selected:
-                        self.dialog._on_item_double_clicked(selected[0])
-                        return True # 事件已处理
+                    # [核心修改] 检查表格是否正处于编辑状态
+                    if self.dialog.file_view.state() == QAbstractItemView.EditingState:
+                        # 如果正在重命名，我们不拦截回车键。
+                        # 返回 False 让事件继续传递给默认的编辑器，
+                        # 编辑器会处理回车键以提交重命名。
+                        return False
+                    else:
+                        # 如果不在编辑状态，则执行“打开文件”操作，模拟双击。
+                        selected = self.dialog.file_view.selectedItems()
+                        if selected:
+                            self.dialog._on_item_double_clicked(selected[0])
+                            return True # 事件已处理
+
                 elif obj is self.dialog.nav_tree:
                     # 在左侧目录树按Enter，展开/折叠节点
                     current_item = self.dialog.nav_tree.currentItem()
@@ -445,7 +521,6 @@ class KeyNavigationFilter(QObject):
                 if obj is self.dialog.nav_tree:
                     # 在左侧按右键，切换到右侧
                     self.dialog.file_view.setFocus()
-                    # 如果右侧列表为空，则不选中；否则选中第一行
                     if self.dialog.file_view.rowCount() > 0:
                         self.dialog.file_view.selectRow(0)
                     return True # 事件已处理
@@ -510,21 +585,18 @@ class FileManagerDialog(QDialog):
         加载所有自定义文件和目录图标。
         图标优先级：插件icons/目录专属 > 插件icons/通用文件类型 > 主程序icons/通用。
         """
-        self.icons = {} # 存储文件扩展名到 QIcon 的映射
-        self.dir_icons = {} # 存储目录名称到 QIcon 的映射
+        self.icons = {}
+        self.dir_icons = {}
 
-        icon_dir = os.path.join(self.plugin_dir, 'icons') # 插件图标目录
+        icon_dir = os.path.join(self.plugin_dir, 'icons')
 
         def load_icon(name):
-            """尝试从插件的 icons 目录加载指定名称的图标。"""
-            for ext in ['.svg', '.png']: # 优先 SVG，其次 PNG
+            for ext in ['.svg', '.png']:
                 path = os.path.join(icon_dir, f"{name}{ext}")
                 if os.path.exists(path):
                     return QIcon(path)
-            return None # 如果找不到，返回 None
+            return None
 
-        # --- 1. 加载文件类型图标 ---
-        # 键是图标文件名，值是对应的文件扩展名列表
         file_icon_map = {
             "audio": [".wav", ".mp3", ".flac", ".ogg"],
             "image": [".png", ".jpg", ".jpeg", ".bmp", ".svg"],
@@ -533,7 +605,10 @@ class FileManagerDialog(QDialog):
             "text_grid": [".textgrid"],
             "text_file": [".txt", ".md", ".log"],
             "python": [".py"],
-            "qss": [".qss"]
+            "qss": [".qss"],
+            "backup": [".bak", ".zip.bak"],
+            # [新增] fdeck 文件图标映射
+            "fdeck": [".fdeck"]
         }
         for name, exts in file_icon_map.items():
             icon = load_icon(name)
@@ -541,24 +616,19 @@ class FileManagerDialog(QDialog):
                 for ext in exts:
                     self.icons[ext] = icon
         
-        # --- 2. 加载目录专属图标 ---
-        # 键是目录名（原始英文名），值是图标文件名
-        # 插件会尝试加载与目录名同名的图标
         dir_names = [
             "Results", "word_lists", "plugins", "themes", "assets", "config",
             "modules", "flashcards", "dialect_visual_wordlists", "PhonAcq_Archives",
             "audio_tts", "audio_record"
         ]
         for name in dir_names:
-            icon = load_icon(name) # 尝试加载如 "Results.svg"
+            icon = load_icon(name)
             if icon:
                 self.dir_icons[name] = icon
 
-        # --- 3. 加载通用文件夹、回收站和未知文件图标 ---
-        # 确保这些关键图标总能被加载，即使自定义图标缺失也能回退到主程序图标
-        self.icons['folder'] = load_icon('folder') or self.icon_manager.get_icon("folder") # 通用文件夹图标
-        self.icons['trash'] = load_icon('trash') or self.icon_manager.get_icon("delete") # 回收站图标
-        self.generic_file_icon = load_icon('unknown') or self.icon_manager.get_icon("file") # 未知文件类型图标
+        self.icons['folder'] = load_icon('folder') or self.icon_manager.get_icon("folder")
+        self.icons['trash'] = load_icon('trash') or self.icon_manager.get_icon("delete")
+        self.generic_file_icon = load_icon('unknown') or self.icon_manager.get_icon("file")
 
     def _init_ui(self):
         """构建对话框的用户界面布局。"""
@@ -609,6 +679,9 @@ class FileManagerDialog(QDialog):
     def _connect_signals(self):
         """连接所有UI控件的信号与槽。"""
         self.nav_tree.currentItemChanged.connect(self._on_nav_item_selected) # 左侧导航树选择改变
+        # [核心新增] 连接左侧导航树的右键菜单请求信号
+        self.nav_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.nav_tree.customContextMenuRequested.connect(self._show_nav_tree_context_menu)
         
         # 右侧文件视图的右键菜单
         self.file_view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -720,6 +793,7 @@ class FileManagerDialog(QDialog):
         trash_item = QTreeWidgetItem(self.nav_tree, ["回收站 (.trash)"])
         trash_item.setIcon(0, self.icons.get("trash"))
         trash_item.setData(0, Qt.UserRole, self.trash_path)
+        trash_item.setData(0, Qt.UserRole + 1, "trash_item")
         trash_item.setToolTip(0, "所有被删除的文件和文件夹都会临时存放在这里。")
         
         # 优化默认选中和展开行为
@@ -903,81 +977,135 @@ class FileManagerDialog(QDialog):
                 is_visible = search_text in item.text().lower() # 判断是否匹配
                 self.file_view.setRowHidden(row, not is_visible) # 隐藏或显示行
 
+    def _handle_open_action(self):
+        """
+        处理右键菜单中的“打开”操作。
+        根据选中的第一个项目的类型，执行不同的动作。
+        """
+        selected_paths = self._get_selected_paths()
+        if not selected_paths:
+            return
+
+        # “打开”操作总是只针对选中的第一个项目
+        path = selected_paths[0]
+
+        if os.path.isdir(path):
+            # 如果是文件夹，则执行与双击相同的内部导航逻辑
+            self._sync_nav_tree_to_path(path)
+        else:
+            # 如果是文件，则使用系统默认程序打开
+            self._open_items([path])
+
     def _get_icon_for_path(self, path):
         """
         根据文件/文件夹的类型或特定文件名返回对应的 QIcon。
-        图标优先级：特定文件名 > 目录专属 > 文件扩展名 > 通用图标。
+        增加了对双重扩展名 .zip.bak 的特殊处理。
         """
         filename = os.path.basename(path)
 
-        # 1. 优先检查特定文件名（如回收站策略文件、通用配置文件）
         if filename in (".trash_policy.json", "config.json", "settings.json"):
             return self.main_window.icon_manager.get_icon("settings")
 
-        # 2. 检查是否为文件夹，并尝试获取目录专属图标
         if os.path.isdir(path):
-            # 尝试获取与目录名匹配的专属图标，否则回退到通用文件夹图标
             return self.dir_icons.get(filename, self.icons.get("folder"))
         
-        # 3. 根据文件扩展名进行回退
-        ext = os.path.splitext(path)[1].lower() # 获取文件扩展名
-        return self.icons.get(ext, self.generic_file_icon) # 根据扩展名查找图标，否则回退到通用文件图标
+        # [核心修复] 对双重扩展名的特殊处理
+        # 检查文件名是否以 .zip.bak 结尾
+        if filename.lower().endswith('.zip.bak'):
+            return self.icons.get('.zip.bak', self.generic_file_icon)
+
+        # 常规的单扩展名处理
+        ext = os.path.splitext(path)[1].lower()
+        return self.icons.get(ext, self.generic_file_icon)
 
     def _generate_tooltip_for_item(self, path):
-        """
-        根据文件类型，调度不同的函数来生成详细的 HTML 格式工具提示。
-        """
         file_type = self._get_file_type(path)
 
         if file_type == 'audio':
-            # 只有在音频库可用时才尝试生成波形图
             if AUDIO_LIBS_AVAILABLE:
                 return self._tooltip_for_audio(path)
             else:
-                # 否则，回退到只显示元数据
                 return self._tooltip_for_metadata(path)        
-        if file_type == 'text':
+        elif file_type == 'text':
             return self._tooltip_for_text(path)
         elif file_type == 'image':
             return self._tooltip_for_image(path)
         elif file_type == 'wordlist':
             return self._tooltip_for_wordlist(path)
+        # [新增] 为 fdeck 文件调用专属的 tooltip 生成器
+        elif file_type == 'fdeck':
+            return self._tooltip_for_fdeck(path)
         elif file_type == 'file':
             return self._tooltip_for_metadata(path)
         
-        return "" # 文件夹不需要 Tooltip
+        return ""
+
+    def _tooltip_for_fdeck(self, path):
+        """
+        [新增] 为 .fdeck 文件生成一个包含其内部元数据摘要的 Tooltip。
+        """
+        try:
+            import zipfile
+            # 从 zip 包中直接读取 manifest.json，而不解压整个文件
+            with zipfile.ZipFile(path, 'r') as zf:
+                if 'manifest.json' in zf.namelist():
+                    with zf.open('manifest.json') as manifest_file:
+                        data = json.load(manifest_file)
+                else:
+                    return f"<b>{os.path.basename(path)}</b><hr>[无效的卡组包: 缺少 manifest.json]"
+
+            meta = data.get('meta', {})
+            cards = data.get('cards', [])
+            
+            # 从元数据中提取信息
+            name = meta.get('deck_name', 'N/A')
+            author = meta.get('author', '未知')
+            description = meta.get('description', '无描述。').replace('\n', '<br>')
+            card_count = len(cards)
+            
+            # 使用 _tooltip_for_metadata 的基础结构来显示通用文件信息
+            base_tooltip = self._tooltip_for_metadata(path)
+            
+            # 将基础信息和 fdeck 专属信息组合起来
+            fdeck_info = f"""
+            <hr style='border: none; border-top: 1px solid #ddd;'>
+            <table style='max-width:300px;'>
+                <tr><td style='vertical-align:top; padding-right:8px; white-space:nowrap;'><b>卡组名称:</b></td><td style='word-wrap:break-word;'>{name}</td></tr>
+                <tr><td style='vertical-align:top; padding-right:8px; white-space:nowrap;'><b>卡片数量:</b></td><td style='word-wrap:break-word;'>{card_count}</td></tr>
+                <tr><td style='vertical-align:top; padding-right:8px; white-space:nowrap;'><b>描述:</b></td><td style='word-wrap:break-word;'>{textwrap.fill(description, 40)}</td></tr>
+            </table>
+            """
+            
+            return base_tooltip + fdeck_info
+
+        except Exception as e:
+            return f"<b>{os.path.basename(path)}</b><hr>[无法预览卡组包: {e}]"
 
     def _get_file_type(self, path):
-        """
-        辅助函数：判断文件的通用类型（文件夹、文本、图片、词表、其他文件）。
-        用于 Tooltip 生成和双击打开逻辑。
-        """
         if os.path.isdir(path): return 'folder'
+        
         ext = os.path.splitext(path)[1].lower()
         audio_exts = {".wav", ".mp3", ".flac", ".ogg"}
-        if ext in audio_exts:
-            return 'audio'
-        
         text_exts = {".txt", ".md", ".log", ".py", ".qss", ".csv", ".textgrid"}
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".svg"}
 
+        if ext in audio_exts: return 'audio'
         if ext in text_exts: return 'text'
         if ext in image_exts: return 'image'
+        # [新增] 将 .fdeck 识别为一种特殊类型
+        if ext == '.fdeck': return 'fdeck'
         
         if ext == '.json':
-            # 特别处理 JSON 文件，尝试判断是否为词表
             try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                with open(path, 'r', encoding='utf-8') as f: data = json.load(f)
                 if 'meta' in data and 'format' in data['meta']:
-                    # 检查是否是标准词表或图文词表
                     if data['meta']['format'] in ["standard_wordlist", "visual_wordlist"]:
                         return 'wordlist'
             except (json.JSONDecodeError, IOError):
-                pass # 不是合法的 JSON 或无法读取，按普通文本文件处理
-            return 'text' # 默认将未知结构的 JSON 也视为文本文件
+                pass
+            return 'text'
 
-        return 'file' # 其他未知文件类型
+        return 'file'
 
     def _tooltip_for_text(self, path, max_lines=15, max_chars_total=800, wrap_width=80):
         """
@@ -1228,40 +1356,184 @@ class FileManagerDialog(QDialog):
         return self._tooltip_for_metadata(path, is_wordlist=True)
 
     def _show_context_menu(self, position):
-        """显示右键上下文菜单。"""
-        menu = QMenu(self.file_view) # 菜单属于 file_view
-        menu.setStyleSheet(self.main_window.styleSheet()) # 应用主窗口的 QSS 样式
+        menu = QMenu(self.file_view)
+        menu.setStyleSheet(self.main_window.styleSheet())
         
         selected_paths = self._get_selected_paths()
-
-        is_in_trash = self._get_current_dir() == self.trash_path
+        current_dir = self._get_current_dir()
+        is_in_trash = current_dir == self.trash_path
 
         if selected_paths:
+            is_single_selection = len(selected_paths) == 1
+            first_path = selected_paths[0]
+            is_folder = os.path.isdir(first_path)
+
+            # [关键修复 2] 检查是否选中了单个备份文件
+            is_single_backup_file = is_single_selection and \
+                                    not is_folder and \
+                                    (first_path.lower().endswith('.bak'))
+
             if is_in_trash:
                 menu.addAction(self.icon_manager.get_icon("replace"), "恢复", lambda: self._restore_items(selected_paths))
-                # “永久删除”在回收站视图中依然是主要操作，位置不变
                 menu.addAction(self.icon_manager.get_icon("delete"), "永久删除", lambda: self._delete_items(selected_paths))
+            
+            elif is_single_backup_file:
+                # --- [新增] 备份文件专属菜单 ---
+                menu.addAction(self.icon_manager.get_icon("replace"), "从备份恢复", lambda: self._restore_from_backup(first_path))
+                menu.addSeparator()
+                menu.addAction(self.icon_manager.get_icon("delete"), "删除备份", lambda: self._delete_items(selected_paths))
+            
             else:
-                menu.addAction(self.icon_manager.get_icon("open_external"), "打开", lambda: self._open_items(selected_paths))
-                menu.addAction(self.icon_manager.get_icon("open_folder"), "打开所在文件夹", lambda: self._open_containing_folder(selected_paths))
-                if len(selected_paths) == 1:
+                # --- 常规文件/文件夹菜单 ---
+                open_action = menu.addAction(self.icon_manager.get_icon("open_external"), "打开")
+                open_action.triggered.connect(self._handle_open_action)
+                open_action.setEnabled(is_single_selection)
+
+                if is_single_selection and not is_folder:
+                    menu.addAction(self.icon_manager.get_icon("open_folder"), "打开所在文件夹", lambda: self._open_containing_folder(selected_paths))
+                
+                menu.addSeparator()
+                backup_action = menu.addAction(self.icon_manager.get_icon("backup"), "创建备份")
+                backup_action.triggered.connect(lambda: self._backup_items(selected_paths))
+                
+                if is_single_selection:
                     menu.addAction(self.icon_manager.get_icon("rename"), "重命名", self._rename_item)
-                menu.addSeparator() # 分隔线
+                
+                menu.addSeparator()
                 menu.addAction(self.icon_manager.get_icon("copy"), "复制 (Ctrl+C)", lambda: self._copy_items(selected_paths))
                 menu.addAction(self.icon_manager.get_icon("cut"), "剪切 (Ctrl+X)", lambda: self._cut_items(selected_paths))
 
         if not is_in_trash:
+            if menu.actions():
+                menu.addSeparator()
+            
+            menu.addAction(self.icon_manager.get_icon("add_folder"), "新建文件夹", self._create_new_folder)
             paste_action = menu.addAction(self.icon_manager.get_icon("paste"), "粘贴 (Ctrl+V)")
             paste_action.setEnabled(bool(self.clipboard_paths))
             paste_action.triggered.connect(self._paste_items)
-        
-        # 只有在选中了文件且不在回收站时，才在菜单末尾添加“删除到回收站”
-        if selected_paths and not is_in_trash:
-            if menu.actions(): # 确保菜单不为空时才加分隔符
-                menu.addSeparator()
+
+        if selected_paths and not is_in_trash and not is_single_backup_file:
+            menu.addSeparator()
             menu.addAction(self.icon_manager.get_icon("delete"), "删除到回收站", lambda: self._delete_items(selected_paths))
             
         menu.exec_(self.file_view.viewport().mapToGlobal(position))
+
+    def _restore_from_backup(self, backup_path):
+        """
+        [新增] 从一个 .bak 文件恢复。
+        - 移除 .bak 后缀得到原始文件名。
+        - 弹窗确认覆盖。
+        - 复制备份文件并重命名，以覆盖原始文件。
+        - 对于 .zip.bak，先解压到临时位置，再移动/合并内容。
+        """
+        try:
+            # 1. 确定原始文件/文件夹的路径
+            if backup_path.lower().endswith('.zip.bak'):
+                original_path = backup_path[:-8] # 移除 .zip.bak
+                is_folder_backup = True
+            else:
+                original_path = backup_path[:-4] # 移除 .bak
+                is_folder_backup = False
+
+            # 2. 弹窗确认
+            item_type = "文件夹" if is_folder_backup or os.path.isdir(original_path) else "文件"
+            reply = QMessageBox.question(self, "确认恢复",
+                                         f"您确定要从备份恢复 '{os.path.basename(backup_path)}' 吗？\n\n"
+                                         f"这将覆盖现有的{item_type}：\n{os.path.basename(original_path)}>",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+
+            # 3. 执行恢复操作
+            if is_folder_backup:
+                # --- 恢复文件夹 ---
+                temp_extract_dir = os.path.join(self.trash_path, f"~restore_{uuid.uuid4().hex}")
+                shutil.unpack_archive(backup_path, temp_extract_dir, 'zip')
+                
+                # 解压后的内容在 temp_extract_dir/original_name/ 下
+                source_content_dir = os.path.join(temp_extract_dir, os.path.basename(original_path))
+                
+                if os.path.exists(original_path):
+                    # 合并内容
+                    shutil.copytree(source_content_dir, original_path, dirs_exist_ok=True)
+                else:
+                    # 直接移动
+                    shutil.move(source_content_dir, original_path)
+                
+                shutil.rmtree(temp_extract_dir) # 清理临时解压目录
+            else:
+                # --- 恢复文件 ---
+                shutil.copy2(backup_path, original_path)
+
+            # 4. 刷新UI
+            self._populate_file_view(self._get_current_dir())
+            if is_folder_backup:
+                self._populate_nav_tree()
+                self._sync_nav_tree_to_path(self._get_current_dir())
+
+        except Exception as e:
+            QMessageBox.critical(self, "恢复失败", f"从备份恢复时出错：\n{e}")
+
+    def _backup_items(self, paths):
+        """
+        [新增] 为选中的文件或文件夹创建备份。
+        - 对于文件，创建 .bak 后缀的副本。
+        - 对于文件夹，先压缩为 .zip，再重命名为 .zip.bak。
+        """
+        current_dir = self._get_current_dir()
+        if not current_dir: return
+
+        for src_path in paths:
+            try:
+                if os.path.isfile(src_path):
+                    # --- 文件备份逻辑 ---
+                    dest_path = f"{src_path}.bak"
+                    shutil.copy2(src_path, dest_path)
+
+                elif os.path.isdir(src_path):
+                    # --- 文件夹备份逻辑 ---
+                    dir_name = os.path.basename(src_path)
+                    # 1. 确定临时的 zip 文件名 (不带 .bak)
+                    zip_path_temp = os.path.join(os.path.dirname(src_path), dir_name)
+                    # 2. 将文件夹压缩成 zip
+                    shutil.make_archive(zip_path_temp, 'zip', root_dir=os.path.dirname(src_path), base_dir=dir_name)
+                    # 3. 将生成的 .zip 文件重命名为 .zip.bak
+                    final_backup_path = f"{zip_path_temp}.zip.bak"
+                    os.rename(f"{zip_path_temp}.zip", final_backup_path)
+            
+            except Exception as e:
+                QMessageBox.critical(self, "备份失败", f"无法为 '{os.path.basename(src_path)}' 创建备份:\n{e}")
+                # 如果一个失败了，继续尝试下一个
+                continue
+        
+        # 所有备份操作完成后，刷新当前视图
+        self._populate_file_view(current_dir)
+
+# [新增] 创建新文件夹的逻辑
+    def _create_new_folder(self):
+        """
+        在当前目录下创建一个新的文件夹。
+        """
+        current_dir = self._get_current_dir()
+        if not current_dir: return
+
+        # 1. 弹窗让用户输入新文件夹名称
+        folder_name, ok = QInputDialog.getText(self, "新建文件夹", "请输入文件夹名称:", QLineEdit.Normal, "新建文件夹")
+
+        if ok and folder_name:
+            new_folder_path = os.path.join(current_dir, folder_name)
+            try:
+                os.makedirs(new_folder_path, exist_ok=False) # exist_ok=False 确保如果已存在则报错
+
+                # [核心] 联动刷新：先刷新右侧，再刷新左侧，最后同步位置
+                self._populate_file_view(current_dir)
+                self._populate_nav_tree()
+                self._sync_nav_tree_to_path(current_dir)
+
+            except FileExistsError:
+                QMessageBox.warning(self, "创建失败", f"名为 '{folder_name}' 的文件夹已存在。")
+            except Exception as e:
+                QMessageBox.critical(self, "创建失败", f"无法创建文件夹:\n{e}")
 
     def _get_current_dir(self):
         """
@@ -1278,11 +1550,19 @@ class FileManagerDialog(QDialog):
 
     def _copy_items_from_selection(self):
         """快捷键触发的复制操作。"""
+        # [核心修正] 增加上下文检查：如果当前在回收站，则禁止操作
+        if self._get_current_dir() == self.trash_path:
+            return
+
         paths = self._get_selected_paths()
         if paths: self._copy_items(paths)
 
     def _cut_items_from_selection(self):
         """快捷键触发的剪切操作。"""
+        # [核心修正] 增加上下文检查：如果当前在回收站，则禁止操作
+        if self._get_current_dir() == self.trash_path:
+            return
+
         paths = self._get_selected_paths()
         if paths: self._cut_items(paths)
 
@@ -1317,34 +1597,119 @@ class FileManagerDialog(QDialog):
         self._open_items([dir_path])
 
     def _rename_item(self):
-        """触发文件视图中的重命名编辑框。"""
-        selected = self.file_view.selectedItems()
-        if selected:
-            # 只有第一列的 item 可以编辑（即名称）
-            self.file_view.editItem(selected[0])
+        """
+        [v1.3 体验优化版]
+        触发文件视图中的重命名编辑框。
+        对于文件，会自动选中文件名部分（不包含扩展名）。
+        对于文件夹，则会全选。
+        """
+        selected_rows = list(set(i.row() for i in self.file_view.selectedItems()))
+        if not selected_rows:
+            return
+
+        # 重命名操作只针对第一个选中的项目
+        row = selected_rows[0]
+        item_to_rename = self.file_view.item(row, 0) # 获取名称列的 QTableWidgetItem
+        if not item_to_rename:
+            return
+
+        path = item_to_rename.data(Qt.UserRole)
+        filename = item_to_rename.text()
+
+        # 开始编辑
+        self.file_view.editItem(item_to_rename)
+
+        # 检查这是否是一个文件（而不是文件夹）
+        # 如果是文件夹，或者文件没有扩展名，则保持默认的全选行为
+        if not os.path.isdir(path):
+            # 使用 os.path.splitext 分离文件名和扩展名
+            basename, extension = os.path.splitext(filename)
+            
+            # 只有当文件确实有扩展名时，才进行部分选中
+            if extension:
+                # 使用 QTimer.singleShot(0, ...) 在下一个事件循环中执行操作。
+                # 这是必需的，因为 QLineEdit 编辑器在调用 editItem() 后不是立即创建的。
+                def select_basename():
+                    # editItem() 会在表格上创建一个临时的 QLineEdit 作为编辑器。
+                    # 我们可以通过 findChild 找到这个编辑器。
+                    editor = self.file_view.findChild(QLineEdit)
+                    if editor:
+                        # setSelection(start_position, length)
+                        editor.setSelection(0, len(basename))
+
+                QTimer.singleShot(0, select_basename)
 
     def _on_item_renamed(self, item):
-        """文件或文件夹重命名完成后的处理。"""
-        if item.column() == 0: # 确保是名称列
-            old_path = item.data(Qt.UserRole)
-            new_name = item.text()
+        """文件或文件夹重命名完成后的处理，实现原地更新。"""
+        # 'item' 是一个 QTableWidgetItem
+        if item.column() != 0:
+            return
+
+        # [核心修正] QTableWidgetItem.data() 只接受一个 role 参数
+        old_path = item.data(Qt.UserRole)
+        new_name = item.text()
+        
+        if not old_path or os.path.basename(old_path) == new_name:
+            return
             
-            # 如果路径无效或名称未改变，则不做任何操作
-            if not old_path or os.path.basename(old_path) == new_name:
-                return
+        dir_name = os.path.dirname(old_path)
+        new_path = os.path.join(dir_name, new_name)
+
+        try:
+            # 1. 执行文件系统重命名
+            os.rename(old_path, new_path)
             
-            dir_name = os.path.dirname(old_path)
-            new_path = os.path.join(dir_name, new_name)
+            # 2. [核心修正] QTableWidgetItem.setData() 也只接受 role 和 value
+            item.setData(Qt.UserRole, new_path)
             
-            try:
-                os.rename(old_path, new_path)
-                item.setData(Qt.UserRole, new_path) # 更新 UserData 中的新路径
-                # 如果是文件夹被重命名，需要刷新整个导航树以反映变化
-                if os.path.isdir(new_path):
-                    self._populate_nav_tree()
-            except Exception as e:
-                QMessageBox.critical(self, "重命名失败", f"无法重命名文件:\n{e}")
-                item.setText(os.path.basename(old_path)) # 恢复旧名称
+            # 3. 如果重命名的是文件夹，则在左侧导航树中找到对应项并更新它
+            if os.path.isdir(new_path):
+                iterator = QTreeWidgetItemIterator(self.nav_tree)
+                item_to_rename_in_tree = None
+                while iterator.value():
+                    tree_item = iterator.value()
+                    # QTreeWidgetItem.data() 需要两个参数 (column, role)，这里是正确的
+                    item_path = tree_item.data(0, Qt.UserRole)
+                    if item_path and os.path.realpath(item_path) == os.path.realpath(old_path):
+                        item_to_rename_in_tree = tree_item
+                        break
+                    iterator += 1
+
+                if item_to_rename_in_tree:
+                    is_plugins_dir = os.path.basename(os.path.dirname(new_path)) == "plugins"
+                    display_name = new_name
+                    if is_plugins_dir:
+                        plugin_meta = self._get_plugin_meta(new_path)
+                        if plugin_meta and plugin_meta.get("name"):
+                            display_name = plugin_meta.get("name")
+                    
+                    # QTreeWidgetItem.setText() 需要 column 参数，这里是正确的
+                    item_to_rename_in_tree.setText(0, display_name)
+                    item_to_rename_in_tree.setData(0, Qt.UserRole, new_path)
+            
+                    self._update_child_paths_recursively(item_to_rename_in_tree, old_path, new_path)
+
+        except Exception as e:
+            QMessageBox.critical(self, "重命名失败", f"无法重命名项目:\n{e}")
+            item.setText(os.path.basename(old_path))
+
+    def _update_child_paths_recursively(self, parent_item, old_base, new_base):
+        """
+        当一个父文件夹被重命名后，递归地更新其所有子项的路径数据。
+        """
+        if not parent_item:
+            return
+            
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            old_path = child.data(0, Qt.UserRole)
+            if old_path and old_path.startswith(old_base):
+                # 使用 os.path.relpath 计算相对路径，然后拼接到新基础上
+                relative_path = os.path.relpath(old_path, old_base)
+                new_path = os.path.join(new_base, relative_path)
+                child.setData(0, Qt.UserRole, new_path)
+                # 递归处理孙子节点
+                self._update_child_paths_recursively(child, old_base, new_path)
 
     def _copy_items(self, paths):
         """将选中的路径存储到剪贴板，操作类型为“复制”。"""
@@ -1357,86 +1722,123 @@ class FileManagerDialog(QDialog):
         self.clipboard_operation = 'cut'
 
     def _paste_items(self):
-        """将剪贴板中的项目粘贴到当前目录。"""
-        dest_dir = self._get_current_dir() # 获取当前目标目录
-        if not dest_dir: return # 如果没有选中目标目录，则返回
+        """[v1.2 副本模式] 将剪贴板中的项目粘贴到当前目录。如果遇到同名冲突，则自动创建副本。"""
+        dest_dir = self._get_current_dir()
 
-        needs_tree_refresh = False # 标记是否需要刷新左侧导航树
+        # [核心修正] 增加上下文检查：禁止向回收站粘贴文件
+        if dest_dir == self.trash_path:
+            QMessageBox.information(self, "操作无效", "不能向回收站中直接粘贴项目。")
+            return
+        
+        current_path_before_paste = dest_dir
+        needs_tree_refresh = False
+        
         for src_path in self.clipboard_paths:
             try:
-                if os.path.isdir(src_path): # 如果粘贴的是文件夹，肯定需要刷新树
+                base_name = os.path.basename(src_path)
+                dest_path = os.path.join(dest_dir, base_name)
+                
+                # [核心修正] 重构冲突处理逻辑
+                # 只要目标路径存在，就需要处理
+                if os.path.exists(dest_path):
+                    # 特殊情况：如果是“剪切”操作，并且源和目标是同一个文件/目录，
+                    # 那么什么都不用做，直接跳过。
+                    if self.clipboard_operation == 'cut' and os.path.samefile(src_path, dest_path):
+                        continue
+
+                    # 对于所有其他情况（包括“复制”到同名文件，或“剪切”到不同但同名的文件），
+                    # 我们都执行创建副本的逻辑。
+                    name, ext = os.path.splitext(base_name)
+                    
+                    copy_dest_path = os.path.join(dest_dir, f"{name} (副本){ext}")
+                    if not os.path.exists(copy_dest_path):
+                        dest_path = copy_dest_path
+                    else:
+                        counter = 2
+                        while True:
+                            copy_dest_path = os.path.join(dest_dir, f"{name} (副本 {counter}){ext}")
+                            if not os.path.exists(copy_dest_path):
+                                dest_path = copy_dest_path
+                                break
+                            counter += 1
+
+                # 执行文件操作
+                if os.path.isdir(src_path):
                     needs_tree_refresh = True
                 
-                dest_path = os.path.join(dest_dir, os.path.basename(src_path))
-                
-                # 检查目标路径是否已存在，并提示用户是否覆盖
-                if os.path.exists(dest_path) and not os.path.samefile(src_path, dest_path):
-                    reply = QMessageBox.question(self, "文件冲突", f"目标位置已存在 '{os.path.basename(src_path)}'。\n是否要覆盖它？",
-                                               QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                    if reply == QMessageBox.No:
-                        continue # 用户选择不覆盖，跳过此文件
-                
                 if self.clipboard_operation == 'copy':
-                    # 复制操作：如果是文件夹，使用 copytree；否则使用 copy2
-                    if os.path.isdir(src_path): shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
-                    else: shutil.copy2(src_path, dest_path)
+                    if os.path.isdir(src_path):
+                        shutil.copytree(src_path, dest_path)
+                    else:
+                        shutil.copy2(src_path, dest_path)
                 elif self.clipboard_operation == 'cut':
-                    # 剪切操作：直接移动文件/文件夹
                     shutil.move(src_path, dest_path)
+            
             except Exception as e:
                 QMessageBox.critical(self, "粘贴失败", f"无法粘贴 '{os.path.basename(src_path)}':\n{e}")
-        
-        # 如果是剪切操作，粘贴完成后清空剪贴板
+                break
+
+        # 如果是剪切操作，完成后清空剪贴板
         if self.clipboard_operation == 'cut':
             self.clipboard_paths = []
             self.clipboard_operation = None
-        
-        # 刷新UI以反映粘贴操作
+
+        # 统一刷新UI
+        self._populate_file_view(current_path_before_paste)
         if needs_tree_refresh:
-            self._populate_nav_tree() # 重建左侧树
-        self._populate_file_view(dest_dir) # 刷新右侧文件列表
+            self._populate_nav_tree()
+            self._sync_nav_tree_to_path(current_path_before_paste)
 
 
     def _on_item_double_clicked(self, item):
         path = self.file_view.item(item.row(), 0).data(Qt.UserRole)
         if not path: return
-        # [新增] 拦截对 .json 配置文件的双击
-        filename = os.path.basename(path).lower()
-        if filename in ("settings.json", "config.json"):
-            # 创建并执行我们的动态编辑器
+
+        ext = os.path.splitext(path)[1].lower()
+        filename = os.path.basename(path)
+
+        # [新增] 1. 优先处理 .fdeck 文件
+        if ext == '.fdeck':
+            manager_plugin = self.main_window.plugin_manager.get_plugin_instance("com.phonacq.flashcard_manager")
+            if manager_plugin:
+                # 执行插件，并通过 kwargs 传递被双击的文件路径
+                manager_plugin.execute(fdeck_path=path) 
+                return
+            else:
+                QMessageBox.information(self, "插件未启用", 
+                                        "请先在“插件管理”中启用“速记卡管理器”插件以编辑此文件。")
+                return
+
+        # 2. 处理 .json 配置文件
+        if filename.lower() in ("settings.json", "config.json"):
             editor_dialog = DynamicJsonEditorDialog(path, self)
             editor_dialog.exec_()
-            return # 处理完毕，不再执行后续逻辑
-        
-        # 拦截对回收站策略文件的双击，打开配置对话框
+            return
+
+        # 3. 处理回收站策略文件
         if os.path.realpath(path) == os.path.realpath(self.trash_policy_config_path):
             dialog = TrashPolicyDialog(self.trash_policy_config_path, self)
             dialog.exec_()
             return
             
+        # 4. 处理文件夹导航
         if os.path.isdir(path):
-            # 如果是文件夹，同步左侧导航树并刷新右侧视图
             self._sync_nav_tree_to_path(path)
             return
         
-        ext = os.path.splitext(path)[1].lower()
-        filename = os.path.basename(path)
-
-        # 检查是否是词表文件
+        # 5. 处理词表文件
         if ext == '.json':
-            # 只有在特定词表目录下才认为是词表，避免误判其他json文件
             if os.path.dirname(path) in [WORD_LIST_DIR, DIALECT_VISUAL_WORDLIST_DIR]:
                 self.main_window.open_in_wordlist_editor(path)
                 return
 
-        # 检查是否是日志文件 (log.txt 通常在 Results/common/participant_X/ 或 Results/visual/participant_X-wordlist/ 目录下)
+        # 6. 处理日志文件
         if filename == 'log.txt':
-            # 进一步判断，确保是结果目录下的日志文件
             if os.path.commonpath([path, os.path.join(BASE_PATH, "Results")]) == os.path.join(BASE_PATH, "Results"):
                  self.main_window.open_in_log_viewer(path)
                  return
             
-        # 对于所有其他文件（包括音频文件），都使用系统默认程序打开
+        # 7. 对于所有其他文件，使用系统默认程序打开
         self._open_items([path])
 
     def _sync_nav_tree_to_path(self, path_to_find):
@@ -1465,100 +1867,164 @@ class FileManagerDialog(QDialog):
                 return # 找到并处理完毕，退出循环
             iterator += 1
 
-    # --- 回收站管理方法 ---
     def _delete_items(self, paths):
         """
+        [v1.2 刷新修复版]
         将选中的项目移动到回收站或永久删除。
-        根据当前目录是否为回收站，决定执行软删除或硬删除。
+        增加了对删除文件夹后UI同步的健壮性修复。
         """
-        # --- [核心修复] ---
-        # 1. 记录删除操作开始时的当前目录
+        # [核心修正] 在执行任何文件系统操作之前，预先判断是否需要刷新导航树。
+        # 这是因为在文件被删除后，os.path.isdir() 将无法正确判断。
+        needs_tree_refresh = any(os.path.isdir(p) for p in paths)
+        
         current_dir_before_delete = self._get_current_dir()
-        
         is_in_trash = current_dir_before_delete == self.trash_path
-        
+
+        # --- 分支1: 永久删除 (在回收站中) ---
         if is_in_trash:
             reply = QMessageBox.question(self, "永久删除", f"您确定要永久删除这 {len(paths)} 个项目吗？\n此操作不可撤销。",
                                          QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        else:
-            reply = QMessageBox.question(self, "删除到回收站", f"您确定要将这 {len(paths)} 个项目移动到回收站吗？",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) # 默认选中“是”
-        
-        if reply != QMessageBox.Yes: return
-
-        metadata = self._load_trash_metadata() # 加载回收站元数据
-        needs_tree_refresh = False # 标记是否需要刷新左侧导航树
-
-        for path in paths:
-            try:
-                if os.path.isdir(path): # 如果删除的是文件夹，可能需要刷新树
-                    needs_tree_refresh = True
-                
-                if is_in_trash:
-                    # 如果已经在回收站，则执行永久删除
+            if reply != QMessageBox.Yes: return
+            
+            metadata = self._load_trash_metadata()
+            for path in paths:
+                try:
                     if os.path.isdir(path): shutil.rmtree(path)
                     else: os.remove(path)
-                    metadata.pop(os.path.basename(path), None) # 从元数据中移除记录
-                else:
-                    # 移动到回收站，添加时间戳避免名称冲突
-                    trash_name = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{os.path.basename(path)}"
-                    shutil.move(path, os.path.join(self.trash_path, trash_name))
-                    # 在元数据中记录原始路径和删除时间
-                    metadata[trash_name] = {"original_path": path, "deleted_time": datetime.now().isoformat()}
-            except Exception as e:
-                QMessageBox.critical(self, "操作失败", f"无法删除 '{os.path.basename(path)}':\n{e}")
-        
-        self._save_trash_metadata(metadata) # 保存更新后的元数据
-        
-        # 刷新UI以反映删除操作
-        if needs_tree_refresh:
-            self._populate_nav_tree() # 重建左侧树
-        
-        # 2. 尝试恢复到删除前的目录
-        # 如果删除的是当前目录本身，或者当前目录在刷新后不存在了，
-        # 则回退到其父目录，或者回收站（如果是从回收站删除）
+                    metadata.pop(os.path.basename(path), None)
+                except Exception as e:
+                    QMessageBox.critical(self, "操作失败", f"无法删除 '{os.path.basename(path)}':\n{e}")
+            self._save_trash_metadata(metadata)
+
+        # --- 分支2: 移动到回收站 (常规目录) ---
+        else:
+            reply = QMessageBox.question(self, "删除到回收站", f"您确定要将这 {len(paths)} 个项目移动到回收站吗？",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply != QMessageBox.Yes: return
+            
+            # 调用插件自身的公共API来执行移动操作
+            file_manager_plugin = self.main_window.plugin_manager.get_plugin_instance("com.phonacq.file_manager")
+            if file_manager_plugin:
+                # 释放可能被其他模块（如音频管理器）占用的文件句柄
+                if hasattr(self.main_window, 'audio_manager_page'):
+                    self.main_window.audio_manager_page.reset_player()
+                    QApplication.processEvents()
+
+                success, message = file_manager_plugin.move_to_trash(paths)
+                if not success:
+                    QMessageBox.critical(self, "移至回收站失败", message)
+            else:
+                QMessageBox.critical(self, "错误", "无法获取文件管理器插件实例。")
+
+        # --- 统一的UI刷新 ---
+        # 首先确定刷新后应该定位到哪个目录
         target_dir_after_delete = current_dir_before_delete
         if not os.path.exists(target_dir_after_delete):
             parent_dir = os.path.dirname(current_dir_before_delete)
-            if os.path.exists(parent_dir):
-                target_dir_after_delete = parent_dir
-            elif is_in_trash: # 如果是从回收站删除，且父目录也不存在，就回到回收站根目录
-                target_dir_after_delete = self.trash_path
-            else: # 否则就回到项目根目录
-                target_dir_after_delete = BASE_PATH
+            # 如果父目录存在，则定位到父目录；否则回退到项目根目录
+            target_dir_after_delete = parent_dir if os.path.exists(parent_dir) else BASE_PATH
+        
+        # 总是刷新右侧的文件视图
+        self._populate_file_view(target_dir_after_delete)
 
-        self._sync_nav_tree_to_path(target_dir_after_delete)
-        self._populate_file_view(target_dir_after_delete) # 刷新右侧文件列表
+        # 只有在确实操作了文件夹时，才刷新计算量更大的左侧导航树
+        if needs_tree_refresh:
+            self._populate_nav_tree()
+            # 刷新树后，确保左侧的选中状态恢复到操作完成后的目标目录
+            self._sync_nav_tree_to_path(target_dir_after_delete)
 
     def _restore_items(self, paths_in_trash):
         """
-        将回收站中的项目恢复到其原始位置。
+        [v1.1] 将回收站中的项目恢复到其原始位置。
+        增加了对目标路径已存在的冲突处理逻辑。
         """
         metadata = self._load_trash_metadata()
         restored_count = 0
-        for path in paths_in_trash:
-            trash_name = os.path.basename(path)
-            if trash_name in metadata:
-                original_path = metadata[trash_name]["original_path"]
-                dest_dir = os.path.dirname(original_path)
-                try:
-                    # 确保目标目录存在
-                    os.makedirs(dest_dir, exist_ok=True)
-                    # 移动文件回原始位置
-                    shutil.move(path, original_path)
-                    metadata.pop(trash_name) # 从元数据中移除记录
-                    restored_count += 1
-                except Exception as e:
-                    QMessageBox.critical(self, "恢复失败", f"无法恢复 '{trash_name}' 到 '{original_path}':\n{e}")
-            else:
+        needs_tree_refresh = False
+
+        for current_trash_path in paths_in_trash:
+            trash_name = os.path.basename(current_trash_path)
+            
+            if trash_name not in metadata:
                 QMessageBox.warning(self, "恢复失败", f"找不到 '{trash_name}' 的原始位置信息。")
+                continue
+
+            original_path = metadata[trash_name]["original_path"]
+            is_folder = os.path.isdir(current_trash_path)
+
+            final_dest_path = original_path
+
+            # [核心修正] 冲突检测与处理
+            if os.path.exists(original_path):
+                # 弹窗询问用户如何处理冲突
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Question)
+                msg_box.setWindowTitle("恢复冲突")
+                item_type = "文件夹" if is_folder else "文件"
+                msg_box.setText(f"目标位置已存在一个同名{item_type}:")
+                msg_box.setInformativeText(f"<b>{os.path.basename(original_path)}</b>\n\n您想如何操作？")
+
+                # 根据是文件还是文件夹，提供不同的选项
+                if is_folder:
+                    merge_btn = msg_box.addButton("合并内容", QMessageBox.AcceptRole)
+                else: # 文件
+                    overwrite_btn = msg_box.addButton("覆盖", QMessageBox.AcceptRole)
+                
+                rename_btn = msg_box.addButton("恢复并重命名", QMessageBox.YesRole)
+                skip_btn = msg_box.addButton("跳过", QMessageBox.RejectRole)
+                
+                msg_box.exec_()
+                clicked_btn = msg_box.clickedButton()
+
+                if clicked_btn == skip_btn:
+                    continue # 跳过这个项目
+                
+                elif clicked_btn == rename_btn:
+                    # 自动寻找可用的副本名称
+                    name, ext = os.path.splitext(original_path)
+                    counter = 1
+                    while True:
+                        # 命名为 "... (已恢复)" 或 "... (已恢复 2)"
+                        renamed_path = f"{name} (已恢复 {counter}){ext}" if counter > 1 else f"{name} (已恢复){ext}"
+                        if not os.path.exists(renamed_path):
+                            final_dest_path = renamed_path
+                            break
+                        counter += 1
+                # 对于文件夹，如果用户选择“合并”，final_dest_path 保持为 original_path
+                # 对于文件，如果用户选择“覆盖”，final_dest_path 保持为 original_path
+            
+            try:
+                dest_dir = os.path.dirname(final_dest_path)
+                os.makedirs(dest_dir, exist_ok=True)
+
+                # 执行恢复操作
+                if is_folder and os.path.exists(final_dest_path):
+                    # 这是“合并”文件夹的逻辑
+                    # 我们需要遍历源文件夹，将其内容逐一移动到目标文件夹
+                    for item in os.listdir(current_trash_path):
+                        src_item_path = os.path.join(current_trash_path, item)
+                        dst_item_path = os.path.join(final_dest_path, item)
+                        # 注意：这里的内层移动也可能产生冲突，为简化，我们直接覆盖
+                        shutil.move(src_item_path, dst_item_path)
+                    shutil.rmtree(current_trash_path) # 删除回收站里的空文件夹
+                else:
+                    # 这是常规移动（恢复到新位置，或覆盖文件）
+                    shutil.move(current_trash_path, final_dest_path)
+
+                metadata.pop(trash_name)
+                restored_count += 1
+                if is_folder:
+                    needs_tree_refresh = True
+            
+            except Exception as e:
+                QMessageBox.critical(self, "恢复失败", f"无法恢复 '{trash_name}':\n{e}")
         
-        self._save_trash_metadata(metadata) # 保存更新后的元数据
+        self._save_trash_metadata(metadata)
         
-        # 刷新UI以反映恢复操作
         if restored_count > 0:
-            self._populate_nav_tree() # 刷新树（以防恢复了文件夹）
-            self._populate_file_view(self.trash_path) # 刷新回收站视图
+            if needs_tree_refresh:
+                self._populate_nav_tree()
+            self._populate_file_view(self.trash_path)
             QMessageBox.information(self, "成功", f"成功恢复了 {restored_count} 个项目。")
 
     def _ensure_trash_policy_exists(self):
@@ -1573,6 +2039,74 @@ class FileManagerDialog(QDialog):
                 "by_size_mb_enabled": True, "max_size_mb": 1024
             }
             self._save_trash_policy(defaults)
+
+# [新增 v1.2] 左侧导航树的右键菜单处理器
+    def _show_nav_tree_context_menu(self, position):
+        """当用户在左侧导航树上右键点击时调用。"""
+        item = self.nav_tree.itemAt(position)
+        if not item:
+            return # 如果点击在空白处，则不显示菜单
+
+        # 检查被点击的条目是否是我们标记的“回收站”
+        if item.data(0, Qt.UserRole + 1) == "trash_item":
+            menu = QMenu(self.nav_tree)
+            
+            # 添加“清空回收站”选项
+            clear_action = menu.addAction(self.icon_manager.get_icon("clear_contents"), "清空回收站...")
+            clear_action.triggered.connect(self._empty_trash)
+            
+            menu.addSeparator()
+
+            # 添加“配置清理策略”选项
+            policy_action = menu.addAction(self.icon_manager.get_icon("settings"), "配置清理策略...")
+            policy_action.triggered.connect(self._open_trash_policy_dialog)
+
+            menu.exec_(self.nav_tree.viewport().mapToGlobal(position))
+
+    # [新增 v1.2] “清空回收站”的逻辑实现
+    def _empty_trash(self):
+        """执行清空回收站的操作。"""
+        # 统计回收站中的项目数量 (排除元数据和策略文件)
+        items_in_trash = [name for name in os.listdir(self.trash_path) if name not in {".metadata.json", ".trash_policy.json"}]
+        
+        if not items_in_trash:
+            QMessageBox.information(self, "回收站", "回收站已经是空的。")
+            return
+
+        # 弹窗进行最终确认
+        reply = QMessageBox.question(self, "确认清空回收站",
+                                     f"您确定要永久删除回收站中的 {len(items_in_trash)} 个项目吗？\n此操作不可撤销！",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            metadata = {} # 准备一个空的元数据字典
+            
+            for name in items_in_trash:
+                path = os.path.join(self.trash_path, name)
+                try:
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                except OSError as e:
+                    QMessageBox.critical(self, "清空失败", f"无法删除 '{name}':\n{e}")
+                    # 即使单个文件失败，也继续尝试删除其他文件
+                    # 并保留现有的元数据，只更新成功的
+                    metadata = self._load_trash_metadata()
+                    metadata.pop(name, None)
+            
+            # 保存空的或更新后的元数据
+            self._save_trash_metadata(metadata)
+            
+            # 刷新UI
+            self._populate_file_view(self.trash_path)
+            QMessageBox.information(self, "成功", "回收站已清空。")
+
+    # [新增 v1.2] 打开策略对话框的辅助方法
+    def _open_trash_policy_dialog(self):
+        """打开回收站清理策略配置对话框。"""
+        dialog = TrashPolicyDialog(self.trash_policy_config_path, self)
+        dialog.exec_()
 
     def _load_trash_policy(self):
         """
@@ -1788,12 +2322,9 @@ class FileManagerDialog(QDialog):
                 QMessageBox.critical(self, "导入失败", f"无法复制 '{os.path.basename(src_path)}':\n{e}")
                 break # 复制失败，中断所有后续操作
         
-        # 只有在拖入了文件夹时才刷新左侧导航树
-        if needs_tree_refresh:
-            self._populate_nav_tree()
-        
-        # 刷新右侧文件视图，以显示新导入的文件
+        self._populate_nav_tree()
         self._populate_file_view(dest_dir)
+
 
         # 强制将导航树的选中项恢复到操作前的位置，确保UI焦点不变
         self._sync_nav_tree_to_path(current_selected_path_before_drop)
