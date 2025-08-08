@@ -1,3 +1,4 @@
+
 # --- START OF FILE plugins/flashcard_manager/manager_main.py ---
 
 import os
@@ -218,8 +219,9 @@ class DeckStudioDialog(QDialog):
         self.player = QMediaPlayer(self)
 
         # --- UI 初始化 ---
-        self.setWindowTitle("速记卡组工作室")
-        self.setGeometry(150, 150, 1200, 800)
+        self.setWindowTitle("速记卡组管理器")
+        self.setGeometry(150, 150, 1300, 900)
+        self.setMinimumSize(1200, 800)
         self._init_ui()
         self._connect_signals()
         self.populate_deck_list()
@@ -361,11 +363,9 @@ class DeckStudioDialog(QDialog):
         return widget
 
     def _create_card_detail_editor(self):
-        """创建用于编辑单个卡片所有属性的详细面板。"""
         widget = QWidget()
         main_layout = QVBoxLayout(widget)
         
-        # 文本信息组 (卡片ID、问题、答案、提示)
         text_group = QGroupBox("文本信息")
         text_layout = QFormLayout(text_group)
         self.card_id_edit = QLineEdit()
@@ -379,46 +379,70 @@ class DeckStudioDialog(QDialog):
         text_layout.addRow("<b>答案 (用 '||' 分隔):</b>", self.card_answer_edit)
         text_layout.addRow("<b>提示:</b>", self.card_hint_edit)
         
-        # 媒体资源组 (图片和音频)
         media_group = QGroupBox("媒体资源")
         media_layout = QHBoxLayout(media_group)
         
-        # 图片编辑区 (预览和操作按钮)
         image_panel = QWidget()
         image_layout = QVBoxLayout(image_panel)
-        self.card_image_preview = ScalableImageLabel("无图片")  # 图片预览
-        self.card_image_preview.setMinimumSize(200, 150)  # 最小尺寸
+        self.card_image_preview = ScalableImageLabel("无图片")
+        self.card_image_preview.setMinimumSize(200, 150)
         img_btn_layout = QHBoxLayout()
         self.set_image_btn = QPushButton("设置图片")
         self.clear_image_btn = QPushButton("清除图片")
         img_btn_layout.addWidget(self.set_image_btn)
         img_btn_layout.addWidget(self.clear_image_btn)
-        image_layout.addWidget(self.card_image_preview, 1)  # 预览占据空间
+        image_layout.addWidget(self.card_image_preview, 1)
         image_layout.addLayout(img_btn_layout)
 
-        # 音频编辑区 (文件名显示和操作按钮)
-        audio_panel = QWidget()
-        audio_layout = QVBoxLayout(audio_panel)
-        self.card_audio_label = QLabel("无音频文件")  # 音频文件名称显示
+        audio_main_panel = QWidget()
+        audio_main_layout = QVBoxLayout(audio_main_panel)
+        
+        # 单词音频区
+        word_audio_group = QGroupBox("单词音频")
+        word_audio_layout = QVBoxLayout(word_audio_group)
+        self.card_audio_label = QLabel("无音频文件")
         self.card_audio_label.setAlignment(Qt.AlignCenter)
-        self.card_audio_label.setWordWrap(True)  # 允许换行
-        self.play_audio_btn = QPushButton("播放音频")  # 播放按钮
-        aud_btn_layout = QHBoxLayout()
-        self.set_audio_btn = QPushButton("设置音频")
-        self.clear_audio_btn = QPushButton("清除音频")
-        aud_btn_layout.addWidget(self.set_audio_btn)
-        aud_btn_layout.addWidget(self.clear_audio_btn)
-        audio_layout.addWidget(self.card_audio_label, 1)  # 文件名占据空间
-        audio_layout.addWidget(self.play_audio_btn)
-        audio_layout.addLayout(aud_btn_layout)
+        self.card_audio_label.setWordWrap(True)
+        
+        # [关键修复] 将三个按钮放在一个水平布局中
+        word_audio_btn_layout = QHBoxLayout()
+        self.play_audio_btn = QPushButton("播放")
+        self.set_audio_btn = QPushButton("设置")
+        self.clear_audio_btn = QPushButton("清除")
+        word_audio_btn_layout.addWidget(self.play_audio_btn)
+        word_audio_btn_layout.addWidget(self.set_audio_btn)
+        word_audio_btn_layout.addWidget(self.clear_audio_btn)
+        
+        word_audio_layout.addWidget(self.card_audio_label, 1)
+        word_audio_layout.addLayout(word_audio_btn_layout)
+
+        # 例句音频区
+        sentence_audio_group = QGroupBox("例句音频")
+        sentence_audio_layout = QVBoxLayout(sentence_audio_group)
+        self.sentence_audio_label = QLabel("无例句音频")
+        self.sentence_audio_label.setAlignment(Qt.AlignCenter)
+        self.sentence_audio_label.setWordWrap(True)
+        
+        # [关键修复] 将三个按钮放在一个水平布局中
+        sentence_audio_btn_layout = QHBoxLayout()
+        self.play_sentence_audio_btn = QPushButton("播放")
+        self.set_sentence_audio_btn = QPushButton("设置")
+        self.clear_sentence_audio_btn = QPushButton("清除")
+        sentence_audio_btn_layout.addWidget(self.play_sentence_audio_btn)
+        sentence_audio_btn_layout.addWidget(self.set_sentence_audio_btn)
+        sentence_audio_btn_layout.addWidget(self.clear_sentence_audio_btn)
+        
+        sentence_audio_layout.addWidget(self.sentence_audio_label, 1)
+        sentence_audio_layout.addLayout(sentence_audio_btn_layout)
+
+        audio_main_layout.addWidget(word_audio_group)
+        audio_main_layout.addWidget(sentence_audio_group)
 
         media_layout.addWidget(image_panel)
-        media_layout.addWidget(audio_panel)
-
-        # 将所有组添加到主布局
+        media_layout.addWidget(audio_main_panel)
         main_layout.addWidget(text_group)
         main_layout.addWidget(media_group)
-        main_layout.addStretch()  # 弹性空间将内容推到顶部
+        main_layout.addStretch()
         return widget
 
     def _create_raw_editor_tab(self):
@@ -442,41 +466,36 @@ class DeckStudioDialog(QDialog):
         return widget
 
     def _connect_signals(self):
-        """[vFinal] 连接所有UI组件的信号到槽函数。"""
-        # 主卡组列表和按钮
+        # ... (大部分连接保持不变) ...
         self.deck_list_widget.currentItemChanged.connect(self._on_deck_selected)
         self.deck_list_widget.customContextMenuRequested.connect(self._show_deck_context_menu)
         self.new_deck_btn.clicked.connect(self._create_new_deck)
         self.save_deck_btn.clicked.connect(self._save_current_deck)
-
-        # Tab 切换
         self.editor_tabs.currentChanged.connect(self._on_tab_changed)
-
-        # 卡片列表编辑器
         self.card_list_widget.currentItemChanged.connect(self._on_card_selected)
         self.card_list_widget.itemClicked.connect(self._on_card_list_item_clicked)
         self.card_list_widget.itemChanged.connect(self._on_card_id_renamed)
         self.card_list_widget.customContextMenuRequested.connect(self._show_card_context_menu)
         
-        # 媒体资源按钮
         self.set_image_btn.clicked.connect(self._set_card_image)
         self.clear_image_btn.clicked.connect(self._clear_card_image)
-        self.play_audio_btn.clicked.connect(self._play_card_audio)
-        self.set_audio_btn.clicked.connect(self._set_card_audio)
-        self.clear_audio_btn.clicked.connect(self._clear_card_audio)
         
-        # [关键修复] 移除对已删除按钮的信号连接
-        # self.batch_import_images_btn.clicked.connect(lambda: self._batch_import_media('image'))
-        # self.batch_import_audio_btn.clicked.connect(lambda: self._batch_import_media('audio'))
+        # [修改] 明确指定音频类型
+        self.play_audio_btn.clicked.connect(lambda: self._play_card_audio('word'))
+        self.set_audio_btn.clicked.connect(lambda: self._set_card_audio('word'))
+        self.clear_audio_btn.clicked.connect(lambda: self._clear_card_audio('word'))
+
+        # [新增] 连接例句音频按钮的信号
+        self.play_sentence_audio_btn.clicked.connect(lambda: self._play_card_audio('sentence'))
+        self.set_sentence_audio_btn.clicked.connect(lambda: self._set_card_audio('sentence'))
+        self.clear_sentence_audio_btn.clicked.connect(lambda: self._clear_card_audio('sentence'))
         
-        # UI 内容变化监听
         for editor in [self.meta_deck_name_edit, self.meta_author_edit, self.meta_desc_edit,
                        self.card_id_edit, self.card_question_edit, self.card_answer_edit,
                        self.card_hint_edit, self.raw_json_edit]:
-            if isinstance(editor, QLineEdit):
-                editor.textChanged.connect(self._on_ui_changed)
-            elif isinstance(editor, QTextEdit):
-                editor.textChanged.connect(self._on_ui_changed)
+            # ... (信号连接逻辑保持不变) ...
+            if isinstance(editor, QLineEdit): editor.textChanged.connect(self._on_ui_changed)
+            elif isinstance(editor, QTextEdit): editor.textChanged.connect(self._on_ui_changed)
 
     # --- UI 状态与数据填充 ---
 
@@ -539,27 +558,18 @@ class DeckStudioDialog(QDialog):
             editor.blockSignals(False)
 
     def _clear_card_detail_editor(self):
-        """清空单个卡片的详情编辑器内容。"""
-        # 阻塞信号，防止清空操作触发 textChanged 信号
-        for w in [self.card_id_edit, self.card_question_edit, self.card_answer_edit, self.card_hint_edit]: 
+        # ... (前半部分保持不变) ...
+        for w in [self.card_id_edit, self.card_question_edit, self.card_answer_edit, self.card_hint_edit]:
             w.blockSignals(True)
-        
-        # 执行清空操作
-        self.card_id_edit.clear()
-        self.card_question_edit.clear()
-        self.card_answer_edit.clear()
-        self.card_hint_edit.clear()
-        
-        # 恢复信号
-        for w in [self.card_id_edit, self.card_question_edit, self.card_answer_edit, self.card_hint_edit]: 
+        self.card_id_edit.clear(); self.card_question_edit.clear(); self.card_answer_edit.clear(); self.card_hint_edit.clear()
+        for w in [self.card_id_edit, self.card_question_edit, self.card_answer_edit, self.card_hint_edit]:
             w.blockSignals(False)
+        self.card_image_preview.set_pixmap(None); self.card_image_preview.setText("无图片")
+        
+        # [修改] 清理两个音频标签和按钮状态
+        self.card_audio_label.setText("无音频文件"); self.play_audio_btn.setEnabled(False)
+        self.sentence_audio_label.setText("无例句音频"); self.play_sentence_audio_btn.setEnabled(False)
 
-        # 清空图片和音频预览
-        self.card_image_preview.set_pixmap(None)
-        self.card_image_preview.setText("无图片")
-        self.card_audio_label.setText("无音频文件")
-        self.play_audio_btn.setEnabled(False)  # 禁用播放按钮
-    
     def _add_placeholder_card(self):
         """
         在卡片列表末尾添加一个特殊的“＋ 添加新卡片…”占位符。
@@ -661,34 +671,16 @@ class DeckStudioDialog(QDialog):
         return ui_manifest_copy
 
     def _update_capabilities(self):
-        """
-        [vFinal] 扫描当前内存中的 manifest 数据，并自动生成/更新 meta.capabilities 列表。
-        在每次保存前调用，以确保元数据与卡组内容完全同步。
-        """
-        if not self.manifest_data:
-            return
-
-        # 获取卡片列表，如果不存在则为空列表
+        if not self.manifest_data: return
         cards = self.manifest_data.get('cards', [])
-        
-        # 使用集合 (set) 来自动处理重复项并保持唯一性
-        new_caps = set()
-
-        # 始终假定卡组支持文本和文本输入，因为这是最基本的功能
-        new_caps.add("text")
-        new_caps.add("text_input")
-
-        # 遍历所有卡片，检查是否存在图片或音频路径，并添加到 capabilities 集合
+        new_caps = {"text", "text_input"}
         for card in cards:
-            if card.get('image_path'):
-                new_caps.add('image')
-            if card.get('audio_path'):
-                new_caps.add('audio')
+            if card.get('image_path'): new_caps.add('image')
+            if card.get('audio_path'): new_caps.add('audio')
+            # [新增] 检测例句音频路径
+            if card.get('sentence_audio_path'): new_caps.add('sentence_audio')
         
-        # 确保 'meta' 键存在于 manifest_data 中
         meta = self.manifest_data.setdefault('meta', {})
-        
-        # 将集合转换为排序后的列表，以保证JSON文件中的顺序一致性
         meta['capabilities'] = sorted(list(new_caps))
 
 
@@ -901,28 +893,15 @@ class DeckStudioDialog(QDialog):
         self._update_ui_state()  # 更新UI状态，检查是否有脏数据
 
     def _populate_card_details(self, item):
-        """
-        用选中卡片的数据填充详情编辑器。
-        加载时阻塞信号，防止文本改变触发脏状态。
-        """
         idx = self.card_list_widget.row(item)
-        # 检查索引是否有效，防止越界
         if not (0 <= idx < len(self.manifest_data.get('cards', []))): return
         card = self.manifest_data['cards'][idx]
         
-        # 阻塞信号，防止在程序性设置文本时触发 _on_ui_changed
+        # ... (文本和图片填充逻辑保持不变) ...
         for w in [self.card_id_edit, self.card_question_edit, self.card_answer_edit, self.card_hint_edit]: w.blockSignals(True)
-        
-        # 填充文本字段
-        self.card_id_edit.setText(card.get('id', ''))
-        self.card_question_edit.setText(card.get('question', ''))
-        self.card_answer_edit.setText(card.get('answer', ''))
-        self.card_hint_edit.setText(card.get('hint', ''))
-        
-        # 解除信号阻塞
+        self.card_id_edit.setText(card.get('id', '')); self.card_question_edit.setText(card.get('question', ''))
+        self.card_answer_edit.setText(card.get('answer', '')); self.card_hint_edit.setText(card.get('hint', ''))
         for w in [self.card_id_edit, self.card_question_edit, self.card_answer_edit, self.card_hint_edit]: w.blockSignals(False)
-        
-        # 填充图片预览
         img_path = card.get('image_path', '')
         if img_path:
             full_img_path = os.path.join(self.working_dir, img_path)
@@ -931,19 +910,28 @@ class DeckStudioDialog(QDialog):
             else: self.card_image_preview.setText(f"图片丢失:\n{img_path}")
         else: self.card_image_preview.set_pixmap(None); self.card_image_preview.setText("无图片")
         
-        # 填充音频信息，并根据文件存在性启用播放按钮
+        # [修改] 分别处理单词和例句音频
+        # 单词音频
         audio_path = card.get('audio_path', '')
         if audio_path:
             full_audio_path = os.path.join(self.working_dir, audio_path)
             if os.path.exists(full_audio_path):
-                self.card_audio_label.setText(os.path.basename(audio_path))
-                self.play_audio_btn.setEnabled(True)
+                self.card_audio_label.setText(os.path.basename(audio_path)); self.play_audio_btn.setEnabled(True)
             else:
-                self.card_audio_label.setText(f"音频丢失:\n{audio_path}")
-                self.play_audio_btn.setEnabled(False)
+                self.card_audio_label.setText(f"音频丢失:\n{audio_path}"); self.play_audio_btn.setEnabled(False)
         else:
-            self.card_audio_label.setText("无音频文件")
-            self.play_audio_btn.setEnabled(False)
+            self.card_audio_label.setText("无音频文件"); self.play_audio_btn.setEnabled(False)
+        
+        # [新增] 例句音频
+        sentence_audio_path = card.get('sentence_audio_path', '')
+        if sentence_audio_path:
+            full_sentence_path = os.path.join(self.working_dir, sentence_audio_path)
+            if os.path.exists(full_sentence_path):
+                self.sentence_audio_label.setText(os.path.basename(sentence_audio_path)); self.play_sentence_audio_btn.setEnabled(True)
+            else:
+                self.sentence_audio_label.setText(f"例句丢失:\n{sentence_audio_path}"); self.play_sentence_audio_btn.setEnabled(False)
+        else:
+            self.sentence_audio_label.setText("无例句音频"); self.play_sentence_audio_btn.setEnabled(False)
 
     def _save_current_card_details(self, previous_item=None):
         """
@@ -973,10 +961,7 @@ class DeckStudioDialog(QDialog):
 
 
     def _add_new_card(self):
-        """
-        [vFinal] 向当前卡组中添加一张新卡片，并立即进入编辑模式。
-        """
-        # 1. 确定一个唯一的默认ID
+        # ... (前半部分保持不变) ...
         base_id = "new_card"; i = 1
         new_id = f"{base_id}_{i}"
         # 收集当前卡组中所有已存在的ID，用于唯一性检查
@@ -986,7 +971,8 @@ class DeckStudioDialog(QDialog):
             new_id = f"{base_id}_{i}"
 
         # 2. 创建新卡片数据结构 (初始值为空)
-        new_card = {"id": new_id, "question": "", "answer": "", "hint": "", "image_path": "", "audio_path": ""}
+        # [修改] 新卡片结构中增加 sentence_audio_path
+        new_card = {"id": new_id, "question": "", "answer": "", "hint": "", "image_path": "", "audio_path": "", "sentence_audio_path": ""}
         # 确保 manifest_data 中有 'cards' 列表
         if 'cards' not in self.manifest_data: self.manifest_data['cards'] = []
         
@@ -1106,49 +1092,33 @@ class DeckStudioDialog(QDialog):
             self._update_ui_state()  # 更新UI状态，标记为脏
 
     def _duplicate_selected_card(self):
-        """创建当前选中卡片的副本。"""
+        # ... (前半部分保持不变) ...
         current_item = self.card_list_widget.currentItem()
-        # 检查是否有选中卡片，且不是占位符
-        if not current_item or current_item.data(self.ADD_NEW_CARD_ROLE):
-            return
-
+        if not current_item or current_item.data(self.ADD_NEW_CARD_ROLE): return
         row = self.card_list_widget.row(current_item)
-        if not (0 <= row < len(self.manifest_data.get('cards', []))):
-            return
-            
-        # 1. 创建卡片数据的深拷贝，确保是独立的副本
+        if not (0 <= row < len(self.manifest_data.get('cards', []))): return
         original_card_data = self.manifest_data['cards'][row]
         new_card_data = copy.deepcopy(original_card_data)
-
-        # 2. 生成唯一的ID
-        base_id = original_card_data.get('id', 'copy') + "_copy"
-        i = 1
-        new_id = base_id
-        # 收集所有现有ID，用于唯一性检查
+        base_id = original_card_data.get('id', 'copy') + "_copy"; i = 1; new_id = base_id
         existing_ids = {c.get('id') for c in self.manifest_data.get('cards', [])}
-        while new_id in existing_ids:
-            new_id = f"{base_id}_{i}"
-            i += 1
+        while new_id in existing_ids: new_id = f"{base_id}_{i}"; i += 1
         new_card_data['id'] = new_id
         
-        # 3. 清空媒体路径，因为媒体文件尚未被复制到临时目录
-        #    用户需要手动为副本设置新的媒体文件或批量导入
+        # [修改] 清空所有媒体路径，包括例句音频
         new_card_data['image_path'] = ""
         new_card_data['audio_path'] = ""
+        new_card_data['sentence_audio_path'] = ""
 
-        # 4. 更新UI和数据模型
-        self._remove_placeholder_card()  # 移除旧的占位符
-        
-        insert_pos = row + 1  # 在原卡片下方插入
-        self.manifest_data['cards'].insert(insert_pos, new_card_data)  # 插入到数据模型
-        
+        # ... (后续逻辑保持不变) ...
+        self._remove_placeholder_card()
+        insert_pos = row + 1
+        self.manifest_data['cards'].insert(insert_pos, new_card_data)
         new_item = QListWidgetItem(new_id)
-        new_item.setFlags(new_item.flags() | Qt.ItemIsEditable)  # 设为可编辑
-        self.card_list_widget.insertItem(insert_pos, new_item)  # 插入到UI列表
-        
-        self._add_placeholder_card()  # 重新添加占位符
-        self.card_list_widget.setCurrentItem(new_item)  # 选中新创建的副本
-        self._update_ui_state()  # 更新UI状态，标记为脏
+        new_item.setFlags(new_item.flags() | Qt.ItemIsEditable)
+        self.card_list_widget.insertItem(insert_pos, new_item)
+        self._add_placeholder_card()
+        self.card_list_widget.setCurrentItem(new_item)
+        self._update_ui_state()
 
     # --- 媒体资源操作 ---
 
@@ -1175,41 +1145,62 @@ class DeckStudioDialog(QDialog):
         self.manifest_data['cards'][row]['image_path'] = ""
         self.card_image_preview.set_pixmap(None); self.card_image_preview.setText("无图片"); self._update_ui_state()
 
-    def _play_card_audio(self):
-        """播放当前卡片关联的音频文件。"""
+    def _play_card_audio(self, audioType='word'):
         current_item = self.card_list_widget.currentItem()
         if not current_item or current_item.data(self.ADD_NEW_CARD_ROLE): return
         row = self.card_list_widget.row(current_item); card = self.manifest_data['cards'][row]
-        audio_path = card.get('audio_path', '')
+        
+        # [修改] 根据 audioType 选择正确的路径键
+        path_key = 'sentence_audio_path' if audioType == 'sentence' else 'audio_path'
+        audio_path = card.get(path_key, '')
+        
         if audio_path:
             full_audio_path = os.path.join(self.working_dir, audio_path)
             if os.path.exists(full_audio_path):
                 self.player.setMedia(QMediaContent(QUrl.fromLocalFile(full_audio_path))); self.player.play()
-            else:
-                QMessageBox.warning(self, "文件丢失", f"音频文件 '{os.path.basename(audio_path)}' 不存在。")
 
-    def _set_card_audio(self):
-        """为当前卡片设置或更换音频。"""
+    def _set_card_audio(self, audioType='word'):
         current_item = self.card_list_widget.currentItem()
         if not current_item or current_item.data(self.ADD_NEW_CARD_ROLE): return
         row = self.card_list_widget.row(current_item); card_id = self.manifest_data['cards'][row]['id']
-        filepath, _ = QFileDialog.getOpenFileName(self, "选择音频文件", "", "音频文件 (*.wav *.mp3 *.flac *.ogg)")
+        filepath, _ = QFileDialog.getOpenFileName(self, f"选择{'例句' if audioType == 'sentence' else '单词'}音频文件", "", "音频文件 (*.wav *.mp3 *.flac *.ogg)")
         if not filepath: return
-        audio_dir = os.path.join(self.working_dir, 'audio'); os.makedirs(audio_dir, exist_ok=True)
+
+        # [修改] 根据 audioType 确定目标子目录和路径键
+        subdir = 'sentence' if audioType == 'sentence' else 'audio'
+        path_key = 'sentence_audio_path' if audioType == 'sentence' else 'audio_path'
+
+        audio_dir = os.path.join(self.working_dir, subdir); os.makedirs(audio_dir, exist_ok=True)
         ext = os.path.splitext(filepath)[1]; dest_filename = f"{card_id}{ext}"; dest_path = os.path.join(audio_dir, dest_filename)
         try:
-            shutil.copy2(filepath, dest_path); relative_path = os.path.join('audio', dest_filename).replace("\\", "/")
-            self.manifest_data['cards'][row]['audio_path'] = relative_path
-            self.card_audio_label.setText(dest_filename); self.play_audio_btn.setEnabled(True); self._update_ui_state()
+            shutil.copy2(filepath, dest_path); relative_path = os.path.join(subdir, dest_filename).replace("\\", "/")
+            self.manifest_data['cards'][row][path_key] = relative_path
+            
+            # [修改] 更新正确的UI标签
+            if audioType == 'sentence':
+                self.sentence_audio_label.setText(dest_filename); self.play_sentence_audio_btn.setEnabled(True)
+            else:
+                self.card_audio_label.setText(dest_filename); self.play_audio_btn.setEnabled(True)
+            
+            self._update_ui_state()
         except Exception as e: QMessageBox.critical(self, "设置音频失败", f"无法复制音频文件：\n{e}")
     
-    def _clear_card_audio(self):
+    def _clear_card_audio(self, audioType='word'):
         """清除当前卡片的音频关联。"""
         current_item = self.card_list_widget.currentItem()
         if not current_item or current_item.data(self.ADD_NEW_CARD_ROLE): return
         row = self.card_list_widget.row(current_item)
-        self.manifest_data['cards'][row]['audio_path'] = ""
-        self.card_audio_label.setText("无音频文件"); self.play_audio_btn.setEnabled(False); self._update_ui_state()
+
+        # [修改] 根据 audioType 确定路径键和UI元素
+        path_key = 'sentence_audio_path' if audioType == 'sentence' else 'audio_path'
+        self.manifest_data['cards'][row][path_key] = ""
+        
+        if audioType == 'sentence':
+            self.sentence_audio_label.setText("无例句音频"); self.play_sentence_audio_btn.setEnabled(False)
+        else:
+            self.card_audio_label.setText("无音频文件"); self.play_audio_btn.setEnabled(False)
+            
+        self._update_ui_state()
 
     def _scan_and_update_media_paths(self):
         """
@@ -1222,8 +1213,11 @@ class DeckStudioDialog(QDialog):
         repaired_count = 0
         cards_by_id = {card['id']: card for card in self.manifest_data.get('cards', [])}
         
-        # 遍历图片和音频两种媒体类型
-        for media_type, subdir, key in [('image', 'images', 'image_path'), ('audio', 'audio', 'audio_path')]:
+        # 遍历图片、单词音频和例句音频三种媒体类型
+        for media_type_data in [('image', 'images', 'image_path'), 
+                                ('word_audio', 'audio', 'audio_path'), 
+                                ('sentence_audio', 'sentence', 'sentence_audio_path')]:
+            _, subdir, key = media_type_data
             media_dir = os.path.join(self.working_dir, subdir)
             if not os.path.isdir(media_dir): continue # 如果媒体子文件夹不存在，跳过
             
@@ -1241,41 +1235,34 @@ class DeckStudioDialog(QDialog):
         return repaired_count > 0  # 返回是否有任何媒体路径被修复
 
     def _batch_import_media(self, media_type):
-        """
-        批量导入图片或音频文件，根据文件名自动匹配卡片ID。
-        文件将被复制到工作目录的相应子文件夹，并更新 manifest。
-        """
         if not self.working_dir: QMessageBox.warning(self, "操作无效", "请先加载一个卡组。"); return
-        source_dir = QFileDialog.getExistingDirectory(self, f"选择包含{media_type}文件的文件夹")
+        source_dir = QFileDialog.getExistingDirectory(self, f"选择包含媒体文件的文件夹")
         if not source_dir: return
+
+        # [修改] 扩展媒体类型映射
+        type_map = {
+            'image': ('images', 'image_path'),
+            'word': ('audio', 'audio_path'),
+            'sentence': ('sentence', 'sentence_audio_path')
+        }
+        if media_type not in type_map: return
         
-        # 根据媒体类型设置目标子目录和 manifest 键名
-        target_subdir, target_key = ('images', 'image_path') if media_type == 'image' else ('audio', 'audio_path')
-        dest_dir = os.path.join(self.working_dir, target_subdir)
-        os.makedirs(dest_dir, exist_ok=True)  # 确保目标子文件夹存在
+        target_subdir, target_key = type_map[media_type]
         
-        cards_by_id = {card['id']: card for card in self.manifest_data.get('cards', [])} # 方便快速查找卡片
+        dest_dir = os.path.join(self.working_dir, target_subdir); os.makedirs(dest_dir, exist_ok=True)
+        cards_by_id = {card['id']: card for card in self.manifest_data.get('cards', [])}
         found_count, not_found_count = 0, 0
-        
-        # 遍历源目录中的所有文件
         for filename in os.listdir(source_dir):
-            file_id, ext = os.path.splitext(filename)  # 提取文件名（不含扩展名）和扩展名
-            if file_id in cards_by_id:  # 如果文件名与某个卡片ID匹配
-                src_path = os.path.join(source_dir, filename)
-                dest_path = os.path.join(dest_dir, filename)
-                
-                shutil.copy2(src_path, dest_path)  # 复制文件
-                # 更新 manifest 中卡片的对应媒体路径
+            file_id, ext = os.path.splitext(filename)
+            if file_id in cards_by_id:
+                src_path = os.path.join(source_dir, filename); dest_path = os.path.join(dest_dir, filename)
+                shutil.copy2(src_path, dest_path)
                 cards_by_id[file_id][target_key] = os.path.join(target_subdir, filename).replace("\\", "/")
                 found_count += 1
-            else: 
-                not_found_count += 1  # 未找到匹配的卡片ID
-        
+            else: not_found_count += 1
         if found_count > 0:
-            # 刷新当前选中的卡片详情，以便立即看到变化 (如果它被导入了媒体)
             self._on_card_selected(self.card_list_widget.currentItem(), self.card_list_widget.currentItem())
-            self._update_ui_state()  # 更新UI状态，标记为脏
-            
+            self._update_ui_state()
         QMessageBox.information(self, "批量导入完成", f"成功匹配并导入 {found_count} 个文件。\n{not_found_count} 个文件未找到匹配的卡片ID。")
 
     # --- 文件系统操作 (新建、显示、复制、删除) ---
@@ -1339,35 +1326,33 @@ class DeckStudioDialog(QDialog):
             QMessageBox.critical(self, "创建失败", f"无法创建新的卡组文件：\n{e}")
 
     def _show_deck_context_menu(self, position):
-        """显示卡组列表的右键上下文菜单。"""
         item = self.deck_list_widget.itemAt(position)
-        if not item: return  # 如果没有点击到项目，不显示菜单
+        if not item: return
 
-        menu = QMenu(self)  # 创建菜单
-        
-        # 定义基本文件操作菜单项
+        menu = QMenu(self)
         show_action = menu.addAction(self.icon_manager.get_icon("open_folder"), "在文件浏览器中显示")
         duplicate_action = menu.addAction(self.icon_manager.get_icon("copy"), "创建副本")
         delete_action = menu.addAction(self.icon_manager.get_icon("delete"), "删除")
         
-        # [新增功能] 批量导入菜单项，只有在有卡组被选中时才显示
-        if self.current_deck_path:
-            menu.addSeparator()
-            batch_import_img_action = menu.addAction(self.icon_manager.get_icon("image"), "批量导入图片...")
-            batch_import_aud_action = menu.addAction(self.icon_manager.get_icon("wav"), "批量导入音频...")
-        else:
-            batch_import_img_action = None # Placeholder if not added
-            batch_import_aud_action = None # Placeholder if not added
+        menu.addSeparator()
+        batch_import_img_action = menu.addAction(self.icon_manager.get_icon("image"), "批量导入图片...")
+        batch_import_aud_action = menu.addAction(self.icon_manager.get_icon("wav"), "批量导入单词音频...")
+        # [新增] 批量导入例句菜单项
+        batch_import_sentence_action = menu.addAction(self.icon_manager.get_icon("play_audio"), "批量导入例句音频...")
 
-        # 弹出菜单并等待用户选择
         action = menu.exec_(self.deck_list_widget.mapToGlobal(position))
         
-        # 根据用户选择执行相应操作
         if action == show_action: self._show_in_explorer(item)
         elif action == duplicate_action: self._duplicate_deck(item)
         elif action == delete_action: self._delete_deck(item)
-        elif action == batch_import_img_action: self._batch_import_media('image')
-        elif action == batch_import_aud_action: self._batch_import_media('audio')
+        elif action == batch_import_img_action:
+            self._batch_import_media('image')
+        elif action == batch_import_aud_action:
+            # [修改] 明确指定导入类型为 'word'
+            self._batch_import_media('word')
+        # [新增] 批量导入例句动作处理
+        elif action == batch_import_sentence_action:
+            self._batch_import_media('sentence')
 
     def _show_card_context_menu(self, position):
         """显示卡片列表的右键上下文菜单。"""
@@ -1421,6 +1406,7 @@ class DeckStudioDialog(QDialog):
         #    用户需要手动为副本设置新的媒体文件或批量导入
         new_card_data['image_path'] = ""
         new_card_data['audio_path'] = ""
+        new_card_data['sentence_audio_path'] = "" # NEW: Clear sentence audio path for duplicate
 
         # 4. 更新UI和数据模型
         self._remove_placeholder_card()  # 移除旧的占位符

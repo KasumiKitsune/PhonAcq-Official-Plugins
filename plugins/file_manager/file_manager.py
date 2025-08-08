@@ -886,40 +886,47 @@ class FileManagerDialog(QDialog):
 
     def _populate_file_view(self, dir_path):
         """
-        填充右侧文件视图：显示指定目录下的所有文件和子文件夹。
-        同时为文件项生成丰富的Tooltip。
+        [v1.1 - 回收站感知版]
+        填充右侧文件视图。
+        如果当前目录是回收站，则将第三列显示为“删除日期”，并从元数据中获取时间。
         """
-        # 显示“正在加载”提示，并强制UI刷新，以避免长时间冻结
         self.current_path_label.setText(f"正在加载: {os.path.relpath(dir_path, BASE_PATH)}...")
-        self.file_view.setRowCount(0) # 清空现有内容
-        self.file_view.setSortingEnabled(False) # 临时禁用排序，提高填充速度
-        QApplication.processEvents() # 确保“正在加载”被渲染
+        self.file_view.setRowCount(0)
+        self.file_view.setSortingEnabled(False)
+        QApplication.processEvents()
 
         is_in_trash = os.path.realpath(dir_path) == os.path.realpath(self.trash_path)
+        trash_metadata = {} # 默认为空字典
+
+        # --- [核心修改 1/3] ---
+        # 如果在回收站中，提前加载元数据并修改表头
+        if is_in_trash:
+            trash_metadata = self._load_trash_metadata()
+            self.file_view.setHorizontalHeaderLabels(["名称 (原始路径)", "大小", "删除日期"])
+        else:
+            self.file_view.setHorizontalHeaderLabels(["名称", "大小", "修改日期"])
         
         try:
-            # --- [核心修复] 手动处理回收站策略文件 ---
+            # --- 手动处理回收站策略文件的逻辑 (保持不变) ---
             if is_in_trash and os.path.exists(self.trash_policy_config_path):
-                # 1. 手动添加策略文件到列表顶部
                 self.file_view.insertRow(0)
                 policy_path = self.trash_policy_config_path
                 policy_name = os.path.basename(policy_path)
                 
                 name_item = QTableWidgetItem(policy_name)
-                name_item.setIcon(self.main_window.icon_manager.get_icon("settings")) # 使用设置图标
+                name_item.setIcon(self.main_window.icon_manager.get_icon("settings"))
                 name_item.setData(Qt.UserRole, policy_path)
-                # 禁止重命名和删除策略文件
                 name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable) 
                 name_item.setToolTip("双击以配置回收站自动清理策略。")
                 self.file_view.setItem(0, 0, name_item)
                 
-                # 为策略文件填充大小和日期信息
                 try:
                     stat = os.stat(policy_path)
                     size_item = NumericTableWidgetItem()
                     size_item.setData(Qt.UserRole, stat.st_size)
                     size_item.setText(f"{stat.st_size} B")
                     self.file_view.setItem(0, 1, size_item)
+                    # 对于策略文件，仍然显示修改日期
                     self.file_view.setItem(0, 2, QTableWidgetItem(datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')))
                 except FileNotFoundError:
                     self.file_view.setItem(0, 1, QTableWidgetItem("N/A")); self.file_view.setItem(0, 2, QTableWidgetItem("N/A"))
@@ -927,11 +934,7 @@ class FileManagerDialog(QDialog):
             # --- 正常列出目录中的其他文件 ---
             items = os.listdir(dir_path)
             for name in sorted(items, key=lambda x: (not os.path.isdir(os.path.join(dir_path, x)), x.lower())):
-                # 2. 移除所有特殊过滤，只过滤元数据文件
-                if is_in_trash and name == ".metadata.json":
-                    continue
-                # 3. 移除对 .trash_policy.json 的过滤，因为它已经被手动添加了
-                if is_in_trash and name == ".trash_policy.json":
+                if is_in_trash and name in {".metadata.json", ".trash_policy.json"}:
                     continue
                 
                 full_path = os.path.join(dir_path, name)
@@ -939,29 +942,51 @@ class FileManagerDialog(QDialog):
                 name_item = QTableWidgetItem(name); name_item.setIcon(self._get_icon_for_path(full_path))
                 name_item.setData(Qt.UserRole, full_path); name_item.setFlags(name_item.flags() | Qt.ItemIsEditable)
                 name_item.setToolTip(self._generate_tooltip_for_item(full_path))
+                
+                # --- [核心修改 2/3] ---
+                # 在回收站中，Tooltip 显示原始路径
+                if is_in_trash and name in trash_metadata:
+                    original_path = trash_metadata[name].get("original_path", "未知")
+                    name_item.setToolTip(f"原始路径: {original_path}")
+
                 self.file_view.setItem(row, 0, name_item)
                 
                 try:
                     stat = os.stat(full_path)
+                    # 文件大小列的逻辑 (保持不变)
                     if os.path.isdir(full_path):
                         size_item = QTableWidgetItem("--"); size_item.setTextAlignment(Qt.AlignCenter)
-                        size_item.setData(Qt.UserRole, -1) # 负值用于排序，确保文件夹排在文件前面
+                        size_item.setData(Qt.UserRole, -1)
                     else:
                         size = stat.st_size
-                        # 扩展格式化逻辑以支持 MB 和 GB
                         if size > 1024 * 1024 * 1024: size_str = f"{size / (1024*1024*1024):.1f} GB"
                         elif size > 1024 * 1024: size_str = f"{size / (1024*1024):.1f} MB"
                         elif size > 1024: size_str = f"{size / 1024:.1f} KB"
                         else: size_str = f"{size} B"
                         size_item = NumericTableWidgetItem(); size_item.setData(Qt.UserRole, size); size_item.setText(size_str)
-                    
                     self.file_view.setItem(row, 1, size_item)
-                    self.file_view.setItem(row, 2, QTableWidgetItem(datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')))
+
+                    # --- [核心修改 3/3] ---
+                    # 日期列的逻辑
+                    if is_in_trash and name in trash_metadata:
+                        # 如果在回收站中，从元数据获取删除日期
+                        deleted_time_str = trash_metadata[name].get("deleted_time", "")
+                        try:
+                            # 解析ISO格式的日期并重新格式化
+                            dt_obj = datetime.fromisoformat(deleted_time_str)
+                            display_time = dt_obj.strftime('%Y-%m-%d %H:%M')
+                        except (ValueError, TypeError):
+                            display_time = "N/A" # 如果日期格式无效
+                        self.file_view.setItem(row, 2, QTableWidgetItem(display_time))
+                    else:
+                        # 否则，显示文件的最后修改日期
+                        self.file_view.setItem(row, 2, QTableWidgetItem(datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')))
+
                 except FileNotFoundError:
                      self.file_view.setItem(row, 1, QTableWidgetItem("N/A")); self.file_view.setItem(row, 2, QTableWidgetItem("N/A"))
-        except Exception as e: QMessageBox.critical(self, "错误", f"无法读取目录 '{dir_path}':\n{e}")
+        except Exception as e: 
+            QMessageBox.critical(self, "错误", f"无法读取目录 '{dir_path}':\n{e}")
         
-        # 恢复显示并启用排序
         self.current_path_label.setText(f"当前: {os.path.relpath(dir_path, BASE_PATH)}")
         self.file_view.setSortingEnabled(True)
 

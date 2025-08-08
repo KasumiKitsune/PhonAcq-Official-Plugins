@@ -57,7 +57,38 @@ except ImportError:
     # 这确保了即使在旧版本或模块缺失时，插件也不会完全崩溃
     print("[Vowel Plotter Warning] Could not import ColorButton from custom_widgets_module. Using a fallback.")
     ColorButton = QPushButton
+# ==============================================================================
+# [新增] 合并图层对话框 (MergeLayersDialog)
+# ==============================================================================
+class MergeLayersDialog(QDialog):
+    """一个简单的对话框，用于获取合并后新图层的名称。"""
+    def __init__(self, num_layers, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("合并图层")
+        
+        layout = QVBoxLayout(self)
+        
+        # 提示信息
+        label = QLabel(f"您正在合并 <b>{num_layers}</b> 个图层。")
+        layout.addWidget(label)
+        
+        # 表单布局用于对齐
+        form_layout = QFormLayout()
+        self.name_edit = QLineEdit("merged_layer") # 默认名称
+        self.name_edit.setToolTip("请输入合并后新图层的名称。")
+        form_layout.addRow("新图层名称:", self.name_edit)
+        
+        layout.addLayout(form_layout)
+        
+        # 确定/取消按钮
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
 
+    def get_new_name(self):
+        """获取用户输入的新图层名称。"""
+        return self.name_edit.text().strip()
 # ==============================================================================
 # 辅助类：PandasModel
 # 用于将 Pandas DataFrame 显示在 QTableView 中
@@ -99,7 +130,7 @@ class LayerConfigDialog(QDialog):
         # 深度复制一份配置，避免直接修改传入的字典，确保“取消”操作不影响原数据
         self.config = deepcopy(existing_config) if existing_config else {}
         self.parent_dialog = parent # 保存对主对话框 (PlotterDialog) 的引用，用于获取颜色方案
-
+        self.split_layers = []
         self.setWindowTitle("配置数据图层")
         self.setMinimumWidth(500)
         self._init_ui()
@@ -203,28 +234,82 @@ class LayerConfigDialog(QDialog):
         self.group_by_combo.setCurrentText(self.config.get('group_col', ''))
 
     def _load_data(self):
-        """加载数据文件（Excel或CSV）到DataFrame。"""
+        """
+        [v2.0 - 自动拆分版]
+        加载数据文件（Excel或CSV）。如果加载的是包含 'source_file' 列的CSV，
+        则自动将其拆分为多个图层。
+        """
         path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "表格文件 (*.xlsx *.xls *.csv)")
         if not path: return
         try:
             df = pd.read_excel(path) if path.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(path)
+        
+            # --- [核心逻辑] 检查是否为可拆分的合并CSV ---
+            if path.lower().endswith('.csv') and 'source_file' in df.columns:
+                # 确认拆分操作
+                reply = QMessageBox.question(self, "检测到合并数据",
+                                             f"此CSV文件包含 'source_file' 列，似乎是一个合并的分析结果。\n\n"
+                                             f"是否要将其自动拆分为 {df['source_file'].nunique()} 个独立的图层？",
+                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            
+                if reply == QMessageBox.Yes:
+                    self._split_and_prepare_layers(df)
+                    # 提示用户并直接接受对话框，将拆分结果传递出去
+                    QMessageBox.information(self, "拆分成功", f"已成功准备 {len(self.split_layers)} 个新图层。")
+                    self.accept() # 自动点击“OK”
+                    return # 结束此方法
+        
+            # --- 如果不是合并CSV或用户选择不拆分，则执行标准加载流程 ---
             self.df = df
             self.data_file_label.setText(os.path.basename(path))
             self.config['data_filename'] = os.path.basename(path)
-            
-            # 如果图层名称为空，则使用文件名作为默认名称
+        
             if not self.name_edit.text():
                 self.name_edit.setText(os.path.splitext(os.path.basename(path))[0])
-            
-            # 清除旧的TextGrid信息，因为数据文件变了
+        
             self.tg = None
             self.tg_file_label.setText("未选择 (可选)")
-            self.config.pop('tg_filename', None) # 移除旧的tg文件名配置
+            self.config.pop('tg_filename', None)
 
-            self._update_combos() # 更新列选择组合框
+            self._update_combos()
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"无法读取数据文件: {e}")
-            self.df = None # 加载失败则清空df
+            self.df = None
+
+    def _split_and_prepare_layers(self, merged_df):
+        """
+        [新增] 将一个合并的DataFrame按 'source_file' 列拆分成多个图层配置。
+        """
+        self.split_layers = [] # 清空旧的拆分结果
+        unique_sources = merged_df['source_file'].unique()
+
+        # 遍历每个唯一的来源文件
+        for source_name in unique_sources:
+            # 筛选出属于该来源的数据
+            single_df = merged_df[merged_df['source_file'] == source_name].copy()
+        
+            # 为这个新图层构建一个完整的配置字典
+            layer_config = {
+                "name": source_name,
+                "df": single_df,
+                "data_filename": f"来自合并文件 ({source_name})",
+                "enabled": True,
+                "locked": False,
+                # 自动检测F1/F2/分组列
+                "f1_col": next((c for c in single_df.columns if 'f1' in c.lower()), ""),
+                "f2_col": next((c for c in single_df.columns if 'f2' in c.lower()), ""),
+                "group_col": next((c for c in single_df.columns if 'vowel' in c.lower() or 'label' in c.lower()), "无分组"),
+                # 默认样式
+                "point_size": 15, "point_alpha": 0.3, "marker": "圆点",
+                "mean_enabled": False, "ellipse_enabled": False,
+                "color_scheme": "默认", "groups": {}
+            }
+            # 如果自动检测失败，提供安全回退
+            numeric_cols = single_df.select_dtypes(include=np.number).columns.tolist()
+            if not layer_config['f1_col'] and len(numeric_cols) > 0: layer_config['f1_col'] = numeric_cols[0]
+            if not layer_config['f2_col'] and len(numeric_cols) > 1: layer_config['f2_col'] = numeric_cols[1]
+
+            self.split_layers.append(layer_config)
 
     def _load_textgrid(self):
         """加载 TextGrid 文件并将其标签应用到 DataFrame。"""
@@ -312,9 +397,15 @@ class LayerConfigDialog(QDialog):
 
     def get_layer_config(self):
         """
-        获取当前对话框中配置的图层信息。
-        返回一个字典，包含图层名称、DataFrame、TextGrid对象、列名等。
+        [v2.0 - 自动拆分版]
+        获取配置。如果检测到拆分的图层，则返回图层列表；
+        否则，返回单个图层的配置字典。
         """
+        # 如果 self.split_layers 列表不为空，说明发生了拆分，优先返回它
+        if self.split_layers:
+            return self.split_layers
+
+        # --- 否则，执行原有的单个图层配置逻辑 ---
         if self.df is None:
             QMessageBox.warning(self, "输入无效", "请先加载数据文件。")
             return None
@@ -458,7 +549,7 @@ class PlotterDialog(QDialog):
         self.layer_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch) # 名称列自适应宽度
         self.layer_table.setColumnWidth(1, 40) # 锁定图标列固定宽度
         self.layer_table.setSelectionBehavior(QTableWidget.SelectRows) # 选中整行
-        self.layer_table.setSelectionMode(QTableWidget.SingleSelection) # 单选
+        self.layer_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.layer_table.verticalHeader().setVisible(False) # 隐藏行号
         self.layer_table.setToolTip("右键单击进行操作，双击可配置图层。")
         self.layer_table.setContextMenuPolicy(Qt.CustomContextMenu) # 启用右键菜单
@@ -735,25 +826,52 @@ class PlotterDialog(QDialog):
     # 图层管理相关方法 (左侧面板)
     # ==========================================================================
     def _add_layer(self):
-        """打开 LayerConfigDialog 添加新图层。"""
+        """
+        [v2.0 - 自动拆分版]
+        打开 LayerConfigDialog 添加新图层。
+        现在可以处理返回单个配置或多个配置列表的情况。
+        """
         dialog = LayerConfigDialog(parent=self)
         if dialog.exec_() == QDialog.Accepted:
-            config = dialog.get_layer_config()
-            if config:
+            result = dialog.get_layer_config()
+            if not result:
+                return
+
+            layers_to_add = []
+            # 检查返回的是否是列表（拆分结果）
+            if isinstance(result, list):
+                layers_to_add = result
+            # 否则，是单个配置字典
+            elif isinstance(result, dict):
+                layers_to_add.append(result)
+            
+            # 遍历所有待添加的图层
+            for config in layers_to_add:
                 # 智能分配标记形状（如果未在LayerConfigDialog中指定）
                 if 'marker' not in config:
                     used_markers = {l.get('marker') for l in self.layers if 'marker' in l}
                     available = [m for m in self.MARKER_STYLES.keys() if m not in used_markers]
-                    config['marker'] = cycle(available or self.MARKER_STYLES.keys()).__next__() # 确保总能取到
+                    config['marker'] = cycle(available or self.MARKER_STYLES.keys()).__next__()
                 
-                # 智能分配初始分组颜色（如果未在LayerConfigDialog中指定）
+                # 智能分配初始分组颜色
                 if 'groups' not in config:
-                    config['groups'] = {} # 初始化为空字典，后续populate时填充
+                    config['groups'] = {}
                 
+                # 检查并确保图层名称唯一
+                base_name = config['name']
+                final_name = base_name
+                counter = 1
+                existing_names = {l['name'] for l in self.layers}
+                while final_name in existing_names:
+                    final_name = f"{base_name} ({counter})"
+                    counter += 1
+                config['name'] = final_name
+
                 self.layers.append(config)
-                self._update_layer_table() # 更新图层列表UI
-                self._update_ui_state() # 更新UI状态（如按钮启用状态）
-                self._plot_data() # 重新绘图
+            
+            self._update_layer_table()
+            self._update_ui_state()
+            self._plot_data()
 
     def _remove_layer(self, row_to_remove=None):
         """移除指定行或当前选中行的图层。"""
@@ -868,47 +986,246 @@ class PlotterDialog(QDialog):
 
     def _show_layer_context_menu(self, pos):
         """显示图层列表的右键上下文菜单。"""
-        row = self.layer_table.rowAt(pos.y())
-        if row < 0: return # 未选中有效行
+        selected_rows = sorted(list(set(item.row() for item in self.layer_table.selectedItems())))
+    
+        if not selected_rows: return
 
         menu = QMenu(self)
-        layer = self.layers[row]
-        is_enabled = layer.get('enabled', True)
-        is_locked = layer.get('locked', False)
+    
+        # --- 合并图层功能 (保持不变) ---
+        if len(selected_rows) > 1:
+            merge_action = menu.addAction(self.icon_manager.get_icon("concatenate"), f"合并选中的 {len(selected_rows)} 个图层...")
+            merge_action.triggered.connect(lambda: self._merge_selected_layers(selected_rows))
+            menu.addSeparator()
 
-        # 显示/隐藏动作
-        if is_enabled: toggle_action = menu.addAction(self.icon_manager.get_icon("hidden"), "隐藏图层")
-        else: toggle_action = menu.addAction(self.icon_manager.get_icon("show"), "显示图层")
+        # --- 单个图层操作 ---
+        if len(selected_rows) == 1:
+            row = selected_rows[0]
+            layer = self.layers[row]
         
-        # 锁定/解锁动作
-        if is_locked: lock_action = menu.addAction(self.icon_manager.get_icon("unlock"), "解锁图层")
-        else: lock_action = menu.addAction(self.icon_manager.get_icon("lock"), "锁定图层")
+            # --- [新增] 拆分图层功能 ---
+            # 检查当前图层的DataFrame是否包含 'source_file' 列
+            df = layer.get('df')
+            if df is not None and 'source_file' in df.columns:
+                split_action = menu.addAction(self.icon_manager.get_icon("cut"), "拆分此图层")
+                split_action.triggered.connect(lambda: self._split_single_layer(row))
+                menu.addSeparator()
+            is_enabled = layer.get('enabled', True)
+            is_locked = layer.get('locked', False)
+
+            # 显示/隐藏动作
+            if is_enabled: toggle_action = menu.addAction(self.icon_manager.get_icon("hidden"), "隐藏图层")
+            else: toggle_action = menu.addAction(self.icon_manager.get_icon("show"), "显示图层")
         
-        menu.addSeparator()
+            # 锁定/解锁动作
+            if is_locked: lock_action = menu.addAction(self.icon_manager.get_icon("unlock"), "解锁图层")
+            else: lock_action = menu.addAction(self.icon_manager.get_icon("lock"), "锁定图层")
         
-        # 其他操作，根据锁定状态禁用
-        rename_action = menu.addAction(self.icon_manager.get_icon("rename"), "重命名...")
-        rename_action.setEnabled(not is_locked)
-        config_action = menu.addAction(self.icon_manager.get_icon("settings"), "配置...")
-        config_action.setEnabled(not is_locked)
-        remove_action = menu.addAction(self.icon_manager.get_icon("delete"), "移除图层")
-        remove_action.setEnabled(not is_locked)
+            menu.addSeparator()
         
-        menu.addSeparator()
+            rename_action = menu.addAction(self.icon_manager.get_icon("rename"), "重命名...")
+            rename_action.setEnabled(not is_locked)
+            config_action = menu.addAction(self.icon_manager.get_icon("settings"), "配置...")
+            config_action.setEnabled(not is_locked)
+            remove_action = menu.addAction(self.icon_manager.get_icon("delete"), "移除图层")
+            remove_action.setEnabled(not is_locked)
         
-        # 保存单层图片动作
-        save_action = menu.addAction(self.icon_manager.get_icon("save"), "保存单层图片...")
-        save_action.setEnabled(is_enabled) # 只有显示的图层才能保存单层图片
+            menu.addSeparator()
         
-        # 执行菜单并根据选择执行动作
-        action = menu.exec_(self.layer_table.mapToGlobal(pos))
+            save_action = menu.addAction(self.icon_manager.get_icon("save"), "保存单层图片...")
+            save_action.setEnabled(is_enabled)
+    
+            action = menu.exec_(self.layer_table.mapToGlobal(pos))
         
-        if action == toggle_action: self._toggle_layer_visibility(row)
-        elif action == lock_action: self._toggle_layer_lock(row)
-        elif action == rename_action: self.layer_table.editItem(self.layer_table.item(row, 0)) # 触发编辑
-        elif action == config_action: self._config_layer(row)
-        elif action == remove_action: self._remove_layer(row)
-        elif action == save_action: self._save_single_layer_image(row)
+            if action == toggle_action: self._toggle_layer_visibility(row)
+            elif action == lock_action: self._toggle_layer_lock(row)
+            elif action == rename_action: self.layer_table.editItem(self.layer_table.item(row, 0))
+            elif action == config_action: self._config_layer(row)
+            elif action == remove_action: self._remove_layer(row)
+            elif action == save_action: self._save_single_layer_image(row)
+        else: # 多选时，只显示合并菜单项
+             action = menu.exec_(self.layer_table.mapToGlobal(pos))
+             # 此处无需 if 判断，因为 merge_action 的 triggered 信号已经连接
+
+    def _split_single_layer(self, row_to_split):
+        """
+        [新增] 核心功能：将单个合并后的图层，按 'source_file' 列拆分成多个新图层。
+        """
+        if not (0 <= row_to_split < len(self.layers)):
+            return
+
+        layer_to_split = self.layers[row_to_split]
+        merged_df = layer_to_split.get('df')
+    
+        if merged_df is None or 'source_file' not in merged_df.columns:
+            QMessageBox.warning(self, "无法拆分", "此图层不包含 'source_file' 列，无法进行拆分。")
+            return
+        
+        unique_sources = merged_df['source_file'].unique()
+    
+        if len(unique_sources) <= 1:
+            QMessageBox.information(self, "无需拆分", "此图层只包含一个来源，无需拆分。")
+            return
+
+        # 1. 准备拆分
+        new_layers_to_add = []
+        base_config = deepcopy(layer_to_split) # 使用被拆分图层的配置作为模板
+
+        for source_name in unique_sources:
+            # 筛选出属于该来源的数据
+            single_df = merged_df[merged_df['source_file'] == source_name].copy()
+            # 移除 'source_file' 列，因为它在新图层中已无意义
+            single_df.drop(columns=['source_file'], inplace=True)
+        
+            # 检查并确保新图层名称唯一
+            final_name = str(source_name) # 确保是字符串
+            counter = 1
+            existing_names = {l['name'] for l in self.layers}
+            while final_name in existing_names:
+                final_name = f"{source_name} ({counter})"
+                counter += 1
+
+            # 构建新图层的配置
+            new_config = deepcopy(base_config)
+            new_config['name'] = final_name
+            new_config['df'] = single_df
+            new_config['data_filename'] = f"拆分自 ({layer_to_split['name']})"
+            # 恢复分组依据为自动猜测或无分组
+            new_config['group_col'] = next((c for c in single_df.columns if 'vowel' in c.lower() or 'label' in c.lower()), "无分组")
+            new_config['groups'] = {} # 清空分组，让其自动生成
+
+            new_layers_to_add.append(new_config)
+
+        # 2. 询问用户是否删除原图层
+        reply = QMessageBox.question(self, "确认拆分",
+                                     f"将把图层 '{layer_to_split['name']}' 拆分为 {len(new_layers_to_add)} 个新图层。\n\n"
+                                     f"是否在拆分后删除原始的合并图层？",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+
+        # 3. 执行操作
+        # 先删除原图层（如果用户同意）
+        if reply == QMessageBox.Yes:
+            del self.layers[row_to_split]
+    
+        # 再添加所有新图层
+        self.layers.extend(new_layers_to_add)
+
+        # 4. 刷新UI
+        self._update_layer_table()
+        # 选中新添加的第一个图层
+        for i, layer in enumerate(self.layers):
+            if layer['name'] == new_layers_to_add[0]['name']:
+                self.layer_table.selectRow(i)
+                break
+        self._plot_data()
+
+    def _merge_selected_layers(self, rows_to_merge):
+        """
+        [v2.0 - TextGrid感知版]
+        核心功能：合并所有选中的图层。
+        此版本智能地处理 TextGrid 标签，通过创建复合标签 (source_label)
+        来同时保留来源文件和原始分组（如元音）的信息。
+        """
+        # 1. 获取新图层名称 (保持不变)
+        dialog = MergeLayersDialog(len(rows_to_merge), self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        new_name = dialog.get_new_name()
+        if not new_name:
+            QMessageBox.warning(self, "名称无效", "新图层的名称不能为空。")
+            return
+        if any(layer['name'] == new_name for layer in self.layers):
+            QMessageBox.warning(self, "名称冲突", f"图层名称 '{new_name}' 已存在。")
+            return
+
+        # 2. 初始化合并过程
+        dfs_to_concat = []
+        base_config = deepcopy(self.layers[rows_to_merge[0]])
+        
+        # 3. [核心逻辑] 遍历所有选中的图层并智能合并数据
+        for row in rows_to_merge:
+            layer = self.layers[row]
+            df = layer.get('df')
+            
+            if df is None or df.empty:
+                continue
+
+            df_copy = df.copy()
+            source_name = layer['name']
+            
+            # 3.1. 添加 source_file 列
+            df_copy['source_file'] = source_name
+            
+            # 3.2. [关键] 创建复合的 source_label 列
+            original_group_col = layer.get('group_col')
+            
+            if original_group_col and original_group_col != "无分组" and original_group_col in df_copy.columns:
+                # --- [核心修复] 在创建复合标签前，先过滤掉 NaN 值 ---
+                # 1. 使用 .dropna() 移除在原始分组列中值为 NaN 的行
+                df_copy.dropna(subset=[original_group_col], inplace=True)
+                
+                # 2. 如果过滤后 DataFrame 为空，则跳过此图层
+                if df_copy.empty:
+                    continue
+                # --- 修复结束 ---
+                
+                original_labels = df_copy[original_group_col].astype(str)
+                df_copy['source_label'] = source_name + " - " + original_labels
+            else:
+                df_copy['source_label'] = source_name
+
+            dfs_to_concat.append(df_copy)
+
+        if not dfs_to_concat:
+            QMessageBox.warning(self, "合并失败", "选中的图层中没有可合并的数据。")
+            return
+            
+        # 4. 创建新的合并后的图层
+        merged_df = pd.concat(dfs_to_concat, ignore_index=True)
+
+        # 更新新图层的配置
+        new_layer_config = base_config
+        new_layer_config['name'] = new_name
+        new_layer_config['df'] = merged_df
+        new_layer_config['data_filename'] = f"合并自 {len(rows_to_merge)} 个图层"
+        
+        # [关键] 将分组依据设置为新的 'source_label' 列
+        new_layer_config['group_col'] = 'source_label' 
+        
+        new_layer_config['tg'] = None
+        new_layer_config['tg_filename'] = "N/A"
+        new_layer_config['locked'] = False
+        new_layer_config['groups'] = {} # 清空旧的分组，让其根据新的复合标签自动生成
+
+        self.layers.append(new_layer_config)
+        
+        # 5. 可选：删除原始图层
+        # --- [核心修复] 修正 f-string 语法错误 ---
+        # 原来的代码: f"...原来的 {len(rows_to_merge)} 个子图层？"
+        # 错误原因: Python 解释器认为 {len...} 是一个需要格式化的表达式
+        
+        # 正确做法: 使用 .format() 方法，或者确保 f-string 中没有其他大括号
+        question_text = (f"已成功创建合并图层 '{new_name}'。\n\n"
+                         "新图层将按'来源-标签'进行分组。\n"
+                         f"是否要删除原来的 {len(rows_to_merge)} 个子图层？")
+        
+        reply = QMessageBox.question(self, "操作完成",
+                                     question_text,
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        # --- 修复结束 ---
+
+        if reply == QMessageBox.Yes:
+            for row in sorted(rows_to_merge, reverse=True):
+                del self.layers[row]
+
+        # 6. 刷新UI (保持不变)
+        self._update_layer_table()
+        for i, layer in enumerate(self.layers):
+            if layer['name'] == new_name:
+                self.layer_table.selectRow(i)
+                break
+        self._plot_data()
 
     def _on_layer_double_clicked(self, item):
         """双击图层项时，打开配置对话框。"""
@@ -1358,15 +1675,21 @@ class PlotterDialog(QDialog):
     def _update_ui_state(self):
         """根据当前图层数据和选中状态更新UI控件的可用性。"""
         has_layers = bool(self.layers)
-        is_layer_selected = self.current_selected_layer_index > -1
+        
+        # [核心修复] 在访问 self.layers 前，检查索引的有效性
+        is_layer_selected = (
+            self.current_selected_layer_index >= 0 and
+            self.current_selected_layer_index < len(self.layers)
+        )
         
         self.plot_button.setEnabled(has_layers)
+        
+        # [核心修复] 只有在索引有效时，才启用右侧面板
         self.layer_settings_group.setEnabled(is_layer_selected)
 
-        # 检查当前选中的图层是否有活动的分组
         has_active_grouping_in_selected_layer = False
-        if is_layer_selected:
-            layer = self.layers[self.current_selected_layer_index]
+        if is_layer_selected: # 只有在索引有效时才继续
+            layer = self.layers[self.current_selected_layer_index] # 现在这一行是安全的
             group_col = layer.get('group_col')
             df = layer.get('df')
             if df is not None and group_col and group_col != "无分组" and group_col in df.columns:
