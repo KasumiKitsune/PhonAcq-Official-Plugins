@@ -627,11 +627,10 @@ class BatchProcessorPlugin(BasePlugin):
     def _run_auto_fix_worker(self, filepath, on_success_callback):
         """这是一个内部方法，负责启动后台线程来执行修复任务。"""
         
-        # [已修正] 内部定义一个简单的工作器
         class AutoFixWorker(QObject):
-            success = pyqtSignal(str) # 成功时发射新文件路径
-            failure = pyqtSignal(str) # 失败时发射错误信息
-            finished = pyqtSignal()   # [核心修正 2.1] 手动添加 'finished' 信号
+            success = pyqtSignal(str)
+            failure = pyqtSignal(str)
+            finished = pyqtSignal()
 
             def __init__(self, path_to_fix):
                 super().__init__()
@@ -639,30 +638,47 @@ class BatchProcessorPlugin(BasePlugin):
 
             def run(self):
                 try:
-                    # (处理逻辑保持不变)
-                    backup_path = self.path_to_fix + ".bak"
-                    shutil.copy2(self.path_to_fix, backup_path)
+                    # 1. 尝试创建备份
+                    try:
+                        backup_path = self.path_to_fix + ".bak"
+                        shutil.copy2(self.path_to_fix, backup_path)
+                    except Exception as backup_e:
+                        print(f"Warning: Could not create backup for {self.path_to_fix}: {backup_e}")
+                    
+                    # 2. 准备目标路径
                     base_path, old_ext = os.path.splitext(self.path_to_fix)
                     target_filepath = base_path + ".wav"
+                    
+                    # 3. 读取和处理音频数据
                     data, sr = sf.read(self.path_to_fix)
                     if data.ndim > 1: data = np.mean(data, axis=1)
                     if sr != 44100:
                         num_samples = int(len(data) * 44100 / sr)
                         data = np.interp(np.linspace(0, len(data), num_samples), np.arange(len(data)), data)
                         sr = 44100
-                    current_rms = np.sqrt(np.mean(data**2));
-                    if current_rms > 1e-9: gain = 0.1 / current_rms; data = np.clip(data * gain, -1.0, 1.0)
+                    current_rms = np.sqrt(np.mean(data**2))
+                    if current_rms > 1e-9:
+                        gain = 0.1 / current_rms
+                        data = np.clip(data * gain, -1.0, 1.0)
+                    
+                    # 4. 写入修复后的文件（可能会覆盖原文件）
                     sf.write(target_filepath, data, sr, format='WAV')
-                    if os.path.exists(self.path_to_fix):
+                    
+                    # --- [核心修正] ---
+                    # 5. 只有在发生了格式转换时 (即输入和输出文件名不同)，才删除原始文件。
+                    if old_ext.lower() != ".wav" and os.path.exists(self.path_to_fix):
                         os.remove(self.path_to_fix)
+                    # --- 修正结束 ---
+
+                    # 6. 报告成功
                     self.success.emit(target_filepath)
+
                 except Exception as e:
                     self.failure.emit(str(e))
                 finally:
-                    # [核心修正 2.2] 无论成功还是失败，最后都必须发射 'finished' 信号
                     self.finished.emit()
 
-        # 创建并启动线程
+        # 创建并启动线程 (这部分逻辑不变)
         self.fix_thread = QThread()
         self.fix_worker = AutoFixWorker(filepath)
         self.fix_worker.moveToThread(self.fix_thread)
@@ -670,36 +686,53 @@ class BatchProcessorPlugin(BasePlugin):
         self.fix_worker.success.connect(on_success_callback)
         self.fix_worker.failure.connect(lambda msg: print(f"自动修复失败: {msg}"))
         
-        # 现在，因为 AutoFixWorker 有了 finished 信号，这些连接都可以正常工作了
         self.fix_worker.finished.connect(self.fix_thread.quit)
         self.fix_thread.finished.connect(self.fix_thread.deleteLater)
-        self.fix_worker.finished.connect(self.fix_worker.deleteLater) # 这行现在是安全的
+        self.fix_worker.finished.connect(self.fix_worker.deleteLater)
         
         self.fix_thread.started.connect(self.fix_worker.run)
         self.fix_thread.start()
 
 
     # [已修正] 插件新的公共API，供外部调用
-    def execute_automatic_fix(self, filepath, on_success_callback):
+    def execute_automatic_fix(self, filepath, on_success_callback, pre_fix_callback=None):
         """
+        [v2.0 - 带前置回调]
         当外部模块检测到无法播放的音频时，调用此方法尝试自动修复。
         它会处理用户确认和“不再询问”的逻辑。
+
+        Args:
+            filepath (str): 需要修复的文件完整路径。
+            on_success_callback (callable): 修复成功后调用的回调函数，会接收新文件路径作为参数。
+            pre_fix_callback (callable, optional): 在执行任何文件操作前调用的回调函数，
+                                                   用于释放文件句柄等前置操作。Defaults to None.
         """
         plugin_settings = self.main_window.config.setdefault("plugin_settings", {}).setdefault("batch_processor", {})
         auto_fix_preference = plugin_settings.get("auto_fix_preference", "ask")
 
-        if auto_fix_preference == "always_run":
+        # 内部函数，封装了启动 worker 的核心逻辑
+        def start_fix():
+            # 1. 在启动 worker 之前，先调用前置回调来释放资源
+            if pre_fix_callback and callable(pre_fix_callback):
+                pre_fix_callback()
+                # 给予UI事件循环一个处理回调的机会，确保资源释放完成
+                QApplication.processEvents()
+
+            # 2. 现在可以安全地启动后台修复工作了
             self._run_auto_fix_worker(filepath, on_success_callback)
+
+        # 如果用户已经设置了“总是运行”，则直接开始修复，不显示任何UI
+        if auto_fix_preference == "always_run":
+            start_fix()
             return
 
+        # --- 用户交互逻辑 ---
         msg_box = QMessageBox(self.main_window)
         msg_box.setIcon(QMessageBox.Question)
         msg_box.setWindowTitle("播放失败 - 自动修复？")
-
-        # [核心修正 1.1] 将主文本设为纯文本
-        msg_box.setText("无法播放文件")
         
-        # [核心修正 1.2] 将包含HTML的内容放入 setInformativeText
+        # 设置主文本和详细信息
+        msg_box.setText("无法播放文件")
         informative_text = (
             f"文件: <b>{os.path.basename(filepath)}</b><br><br>"
             "此文件可能格式不受支持或已损坏。<br><br>"
@@ -708,25 +741,27 @@ class BatchProcessorPlugin(BasePlugin):
         )
         msg_box.setInformativeText(informative_text)
 
+        # 添加“不再询问”复选框
         dont_ask_again_cb = QCheckBox("记住我的选择，下次自动执行")
         msg_box.setCheckBox(dont_ask_again_cb)
         
+        # 添加按钮
         yes_btn = msg_box.addButton("是，请修复", QMessageBox.YesRole)
         no_btn = msg_box.addButton("否", QMessageBox.NoRole)
         msg_box.setDefaultButton(yes_btn)
 
+        # 显示对话框并等待用户选择
         msg_box.exec_()
 
+        # 处理用户选择
         if msg_box.clickedButton() == yes_btn:
             # 如果用户同意，检查复选框状态并保存设置
             if dont_ask_again_cb.isChecked():
                 plugin_settings["auto_fix_preference"] = "always_run"
                 
-                # [核心修正] 直接调用主窗口的全局保存方法。
-                # 因为 plugin_settings 已经是主配置的引用，
-                # 我们只需要触发保存即可。
+                # 调用主窗口的全局保存方法
                 if hasattr(self.main_window, 'save_config'):
                     self.main_window.save_config()
 
-            # 开始后台修复工作
-            self._run_auto_fix_worker(filepath, on_success_callback)
+            # 开始修复流程
+            start_fix()

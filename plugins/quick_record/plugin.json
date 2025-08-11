@@ -1,0 +1,12 @@
+{
+   "id": "com.phonacq.quick_record",
+   "name": "随录",
+   "version": "1.0.0",
+   "author": "PhonAcq Assistant Team",
+   "description": "一个即时录音工具，可以快速录制一个或多个音频片段，并将其保存或直接发送到音频分析模块。",
+   "main_file": "quick_record.py",
+   "entry_class": "QuickRecordPlugin",
+   "icon": "record.png",
+    "manual_file": "manual.md",
+   "tags": ["工具", "录音", "效率"]
+}
