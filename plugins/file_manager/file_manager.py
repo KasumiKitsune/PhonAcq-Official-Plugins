@@ -390,39 +390,57 @@ class FileManagerPlugin(BasePlugin):
     def __init__(self, main_window, plugin_manager):
         super().__init__(main_window, plugin_manager)
         self.dialog = None # 存储对话框实例，实现单例模式
-        
-        # [核心修正] 预先计算并存储回收站的相关路径，供API方法使用
         self.trash_path = os.path.join(BASE_PATH, ".trash")
         self.trash_metadata_path = os.path.join(self.trash_path, ".metadata.json")
+        self.launcher_plugin_instance = None # [新增] 用于存储启动器插件的实例
 
     def setup(self):
-        """插件启用时调用。对于独立窗口插件，通常只需返回 True。"""
-        print("[File Manager] 插件已准备就绪。")
+        """
+        [v1.2 修改] 插件启用时调用。
+        检查外部工具启动器插件是否激活，如果激活则获取其引用。
+        """
+        # 尝试获取外部工具启动器插件的实例
+        launcher_plugin_id = "com.phonacq.external_tool_launcher"
+        if launcher_plugin_id in self.plugin_manager.active_plugins:
+            self.launcher_plugin_instance = self.plugin_manager.get_plugin_instance(launcher_plugin_id)
+            print("[File Manager] 成功连接到外部工具启动器插件。")
+        else:
+            self.launcher_plugin_instance = None
+            print("[File Manager] 未找到激活的外部工具启动器插件，联动功能将不可用。")
+            
         return True
 
     def teardown(self):
         """插件禁用时调用。确保关闭可能存在的对话框，释放资源。"""
         if self.dialog:
             self.dialog.close()
+        # 清理对其他插件的引用
+        self.launcher_plugin_instance = None
         print("[File Manager] 插件已卸载。")
 
     def execute(self, **kwargs):
         """
-        执行插件。当用户从插件菜单点击时调用。
-        采用单例模式，如果对话框已存在则显示，否则创建新的。
+        [v1.2 修改] 执行插件。
+        在创建对话框后，如果启动器插件存在，则将钩子挂载到对话框上。
         """
         if self.dialog is None:
             self.dialog = FileManagerDialog(self.main_window)
-            # 连接对话框的 finished 信号，当对话框关闭时清除引用
+            
+            # [核心新增] 将启动器插件实例作为钩子挂载到对话框上
+            if self.launcher_plugin_instance:
+                setattr(self.dialog, 'external_launcher_plugin_active', self.launcher_plugin_instance)
+            
             self.dialog.finished.connect(self._on_dialog_finished)
         
-        # 显示对话框并将其置于顶层，确保用户能看到它
         self.dialog.show()
         self.dialog.raise_()
         self.dialog.activateWindow()
 
     def _on_dialog_finished(self):
-        """当对话框关闭时，清除对话框实例的引用，以便下次可以重新创建。"""
+        """当对话框关闭时，清除对话框实例的引用。"""
+        # [核心新增] 对话框关闭时，也确保钩子被解开，尽管 teardown 也会做
+        if self.dialog and hasattr(self.dialog, 'external_launcher_plugin_active'):
+            delattr(self.dialog, 'external_launcher_plugin_active')
         self.dialog = None
 
     # [核心新增] 公共API，供其他模块调用
@@ -1381,54 +1399,79 @@ class FileManagerDialog(QDialog):
         return self._tooltip_for_metadata(path, is_wordlist=True)
 
     def _show_context_menu(self, position):
+        """
+        [v1.5 - 菜单顺序优化版]
+        根据右键点击的位置和上下文（选中的项目、当前目录等），
+        动态构建并显示一个功能丰富的右键菜单。
+        此版本调整了“用外部工具打开”菜单项的位置。
+        """
         menu = QMenu(self.file_view)
         menu.setStyleSheet(self.main_window.styleSheet())
         
         selected_paths = self._get_selected_paths()
         current_dir = self._get_current_dir()
-        is_in_trash = current_dir == self.trash_path
+        is_in_trash = (current_dir == self.trash_path)
 
+        contains_only_files = selected_paths and all(os.path.isfile(p) for p in selected_paths)
+
+        # ----------------------------------------------------------------------
+        # 第一部分: 处理选中项目相关的操作
+        # ----------------------------------------------------------------------
         if selected_paths:
             is_single_selection = len(selected_paths) == 1
             first_path = selected_paths[0]
             is_folder = os.path.isdir(first_path)
+            is_single_backup_file = is_single_selection and not is_folder and \
+                                    (first_path.lower().endswith('.bak') or first_path.lower().endswith('.zip.bak'))
 
-            # [关键修复 2] 检查是否选中了单个备份文件
-            is_single_backup_file = is_single_selection and \
-                                    not is_folder and \
-                                    (first_path.lower().endswith('.bak'))
-
+            # --- 场景1: 在回收站中 ---
             if is_in_trash:
                 menu.addAction(self.icon_manager.get_icon("replace"), "恢复", lambda: self._restore_items(selected_paths))
                 menu.addAction(self.icon_manager.get_icon("delete"), "永久删除", lambda: self._delete_items(selected_paths))
-            
+
+            # --- 场景2: 选中了单个备份文件 ---
             elif is_single_backup_file:
-                # --- [新增] 备份文件专属菜单 ---
                 menu.addAction(self.icon_manager.get_icon("replace"), "从备份恢复", lambda: self._restore_from_backup(first_path))
                 menu.addSeparator()
                 menu.addAction(self.icon_manager.get_icon("delete"), "删除备份", lambda: self._delete_items(selected_paths))
-            
+
+            # --- 场景3: 常规文件/文件夹 ---
             else:
-                # --- 常规文件/文件夹菜单 ---
+                # --- “打开”功能组 ---
                 open_action = menu.addAction(self.icon_manager.get_icon("open_external"), "打开")
                 open_action.triggered.connect(self._handle_open_action)
                 open_action.setEnabled(is_single_selection)
-
+                
                 if is_single_selection and not is_folder:
                     menu.addAction(self.icon_manager.get_icon("open_folder"), "打开所在文件夹", lambda: self._open_containing_folder(selected_paths))
+
+                # [核心修改] 将外部工具启动器的逻辑移动到这里
+                # ----------------------------------------------------
+                launcher_plugin = getattr(self, 'external_launcher_plugin_active', None)
+                if launcher_plugin and contains_only_files: # is_in_trash 已经在场景1处理了
+                    # 调用插件来填充菜单
+                    launcher_plugin.populate_menu(menu, selected_paths)
+                # ----------------------------------------------------
                 
                 menu.addSeparator()
+
+                # --- “编辑”功能组 ---
                 backup_action = menu.addAction(self.icon_manager.get_icon("backup"), "创建备份")
                 backup_action.triggered.connect(lambda: self._backup_items(selected_paths))
-                
                 if is_single_selection:
                     menu.addAction(self.icon_manager.get_icon("rename"), "重命名", self._rename_item)
                 
                 menu.addSeparator()
+
+                # --- “剪贴板”功能组 ---
                 menu.addAction(self.icon_manager.get_icon("copy"), "复制 (Ctrl+C)", lambda: self._copy_items(selected_paths))
                 menu.addAction(self.icon_manager.get_icon("cut"), "剪切 (Ctrl+X)", lambda: self._cut_items(selected_paths))
 
+        # ----------------------------------------------------------------------
+        # 第二部分: 处理当前目录相关的操作 (如新建、粘贴)
+        # ----------------------------------------------------------------------
         if not is_in_trash:
+            # 只有在常规目录且菜单中已有内容时才添加分隔符
             if menu.actions():
                 menu.addSeparator()
             
@@ -1436,12 +1479,19 @@ class FileManagerDialog(QDialog):
             paste_action = menu.addAction(self.icon_manager.get_icon("paste"), "粘贴 (Ctrl+V)")
             paste_action.setEnabled(bool(self.clipboard_paths))
             paste_action.triggered.connect(self._paste_items)
-
-        if selected_paths and not is_in_trash and not is_single_backup_file:
-            menu.addSeparator()
-            menu.addAction(self.icon_manager.get_icon("delete"), "删除到回收站", lambda: self._delete_items(selected_paths))
             
-        menu.exec_(self.file_view.viewport().mapToGlobal(position))
+        # ----------------------------------------------------------------------
+        # 第三部分: 删除操作 (几乎总是可用)
+        # ----------------------------------------------------------------------
+        if selected_paths and not is_in_trash:
+             menu.addSeparator()
+             menu.addAction(self.icon_manager.get_icon("delete"), "删除到回收站", lambda: self._delete_items(selected_paths))
+
+        # ----------------------------------------------------------------------
+        # 第四部分: 显示菜单
+        # ----------------------------------------------------------------------
+        if menu.actions():
+            menu.exec_(self.file_view.viewport().mapToGlobal(position))
 
     def _restore_from_backup(self, backup_path):
         """

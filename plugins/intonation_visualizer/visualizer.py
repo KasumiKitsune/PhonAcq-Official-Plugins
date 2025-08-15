@@ -8,7 +8,7 @@ import numpy as np
 from itertools import cycle
 from copy import deepcopy
 import re
-
+import shutil
 # PyQt5 核心 UI 模块
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
                              QMessageBox, QTableView, QHeaderView, QComboBox, QCheckBox,
@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLa
 # PyQt5 核心功能模块与图形绘制
 from PyQt5.QtCore import Qt, QAbstractTableModel, pyqtSignal, QEvent, QSize, pyqtProperty, QTimer
 from PyQt5.QtGui import QIcon, QColor, QPalette, QPixmap, QFont, QPainter, QCursor, QPen
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 # Matplotlib 和 TextGrid 库导入
 try:
@@ -190,27 +191,28 @@ class ReadOnlyDelegate(QItemDelegate):
 # ==============================================================================
 class LayerConfigDialog(QDialog):
     def __init__(self, existing_config=None, parent=None):
-        """
-        初始化图层配置对话框。
-        :param existing_config: 一个可选的字典，包含现有图层的配置，用于编辑模式。
-        :param parent: 父 QWidget。
-        """
         super().__init__(parent)
-        self.df = None # 存储加载的 F0 数据 DataFrame
-        self.tg = None # [NEW] 存储加载的 TextGrid 对象
-        # 深度复制一份配置，避免直接修改传入的字典，确保“取消”操作不影响原数据
-        self.config = deepcopy(existing_config) if existing_config else {}
-        self.parent_dialog = parent # 保存对主对话框 (VisualizerDialog) 的引用
+        self.df = None
+        self.tg = None
+        
+        # --- [核心修复] 移除 deepcopy，采用浅复制和手动数据恢复 ---
+        self.config = existing_config.copy() if existing_config else {}
+        if existing_config:
+            # 手动恢复对大型数据对象的引用，而不是复制它们
+            self.df = existing_config.get('df')
+            self.tg = existing_config.get('tg')
+            # 同样，手动恢复 audio_data
+            self.config['audio_data'] = existing_config.get('audio_data')
 
+        self.parent_dialog = parent
         self.setWindowTitle("配置数据图层")
         self.setMinimumWidth(500)
         self._init_ui()
         self._connect_signals()
-        if self.config:
-            self._populate_from_config() # 如果是编辑现有图层，则填充UI
         
-        # 确保在初始化时更新组合框，即使没有预设配置
-        # 这也处理了初始加载df时自动填充列名的情况
+        if self.config:
+            self._populate_from_config()
+        
         self._update_combos()
 
     def _init_ui(self):
@@ -218,12 +220,10 @@ class LayerConfigDialog(QDialog):
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
         
-        # 图层名称输入框
         self.name_edit = QLineEdit(self.config.get('name', ''))
         self.name_edit.setPlaceholderText("例如：陈述句-男声")
         self.name_edit.setToolTip("为该数据图层指定一个唯一的名称。")
         
-        # 数据文件选择 (Excel 或 CSV)
         data_layout = QHBoxLayout()
         self.load_data_btn = QPushButton("选择文件...")
         self.load_data_btn.setToolTip("加载包含时间与F0数据的 Excel (.xlsx, .xls) 或 CSV (.csv) 文件。")
@@ -231,7 +231,6 @@ class LayerConfigDialog(QDialog):
         self.data_file_label.setWordWrap(True)
         data_layout.addWidget(self.load_data_btn); data_layout.addWidget(self.data_file_label, 1)
 
-        # [NEW] TextGrid 文件选择
         tg_layout = QHBoxLayout()
         self.load_tg_btn = QPushButton("选择文件...")
         self.load_tg_btn.setToolTip("加载 TextGrid (.TextGrid) 文件为数据点添加标签。\n数据文件必须包含 'timestamp' 列。")
@@ -239,26 +238,32 @@ class LayerConfigDialog(QDialog):
         self.tg_file_label.setWordWrap(True)
         tg_layout.addWidget(self.load_tg_btn); tg_layout.addWidget(self.tg_file_label, 1)
 
-        # 数据列指定（时间, F0, 分组）
-        self.time_combo = QComboBox(); self.time_combo.setToolTip("选择代表时间的数据列，将作为图表的 X 轴。")
-        self.f0_combo = QComboBox(); self.f0_combo.setToolTip("选择代表基频 (F0) 的数据列，将作为图表的 Y 轴。")
+        audio_layout = QHBoxLayout()
+        self.load_audio_btn = QPushButton("选择音频文件...")
+        self.load_audio_btn.setToolTip("为该图层加载关联的音频文件，以便进行片段播放。")
         
-        # [MODIFIED] 分组依据现在是 QComboBox，允许选择 DataFrame 中的列
-        self.group_by_combo = QComboBox()
-        self.group_by_combo.setToolTip("选择用于对数据点进行分组的列。\n选择'无分组'则所有点使用相同样式。\n使用TextGrid后，可选择 'textgrid_label' 进行分组。")
+        audio_path = self.config.get('audio_path')
+        audio_filename_display = os.path.basename(audio_path) if audio_path and isinstance(audio_path, str) else "未选择 (可选)"
+        self.audio_file_label = QLabel(audio_filename_display)
+        self.audio_file_label.setWordWrap(True)
         
-        # 将所有控件添加到表单布局
+        self.load_audio_btn.setEnabled(self.tg is not None)
+
+        audio_layout.addWidget(self.load_audio_btn)
+        audio_layout.addWidget(self.audio_file_label, 1)
+
+        self.time_combo = QComboBox(); self.f0_combo = QComboBox(); self.group_by_combo = QComboBox()
+
         form_layout.addRow("图层名称:", self.name_edit)
         form_layout.addRow("数据文件:", data_layout)
-        form_layout.addRow("TextGrid:", tg_layout) # [NEW] 将 TextGrid 行添加到布局
-        form_layout.addRow(QFrame(frameShape=QFrame.HLine)) # 分隔线
+        form_layout.addRow("TextGrid:", tg_layout)
+        form_layout.addRow("音频文件:", audio_layout)
+        form_layout.addRow(QFrame(frameShape=QFrame.HLine))
         form_layout.addRow("时间 (X轴):", self.time_combo)
         form_layout.addRow("F0 (Y轴):", self.f0_combo)
-        form_layout.addRow("分组依据:", self.group_by_combo) # [MODIFIED] 使用 QComboBox
+        form_layout.addRow("分组依据:", self.group_by_combo)
 
         layout.addLayout(form_layout)
-        
-        # 标准确定/取消按钮
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept); button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
@@ -266,23 +271,61 @@ class LayerConfigDialog(QDialog):
     def _connect_signals(self):
         """连接UI控件的信号到槽函数。"""
         self.load_data_btn.clicked.connect(self._load_data)
-        self.load_tg_btn.clicked.connect(self._load_textgrid) # [NEW] 连接加载 TextGrid 按钮
+        self.load_tg_btn.clicked.connect(self._load_textgrid)
+        self.load_audio_btn.clicked.connect(self._load_audio)
+
+    def _load_audio(self):
+        """
+        [v11.1 - 健壮性修复版]
+        加载音频文件，并直接将数据和路径存入 self.config。
+        """
+        filepath, _ = QFileDialog.getOpenFileName(self, "选择关联的音频文件", "", "音频文件 (*.wav *.mp3 *.flac)")
+        if not filepath:
+            return
+        
+        try:
+            import librosa
+            y, sr = librosa.load(filepath, sr=None, mono=True)
+            
+            # [核心修改] audio_path 现在存储的是原始绝对路径
+            self.config['audio_path'] = filepath
+            self.config['audio_data'] = (y, sr)
+            
+            self.audio_file_label.setText(os.path.basename(filepath))
+            QMessageBox.information(self, "加载成功", f"音频文件 '{os.path.basename(filepath)}' 已成功关联。")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "加载失败", f"无法加载或处理音频文件:\n{e}")
+            self.config.pop('audio_path', None)
+            self.config.pop('audio_data', None)
+            self.audio_file_label.setText("加载失败")
 
     def _populate_from_config(self):
-        """根据传入的配置字典填充UI控件。"""
+        """
+        [v2.1 - 音频UI恢复版, 与plotter对齐]
+        根据传入的配置字典，完整地填充对话框中所有UI控件的状态。
+        """
         self.df = self.config.get('df')
-        self.tg = self.config.get('tg') # [NEW] 恢复 TextGrid 对象
+        self.tg = self.config.get('tg')
+
+        if 'data_filename' in self.config:
+            self.data_file_label.setText(self.config['data_filename'])
+        if 'tg_filename' in self.config:
+            self.tg_file_label.setText(self.config['tg_filename'])
+
+        self.load_audio_btn.setEnabled(self.tg is not None)
+
+        audio_path = self.config.get('audio_path')
+        if audio_path and isinstance(audio_path, str):
+            self.audio_file_label.setText(os.path.basename(audio_path))
+        else:
+            self.audio_file_label.setText("未选择 (可选)")
         
-        # 恢复文件名标签显示
-        if 'data_filename' in self.config: self.data_file_label.setText(self.config['data_filename'])
-        if 'tg_filename' in self.config: self.tg_file_label.setText(self.config['tg_filename']) # [NEW]
+        self._update_combos()
         
-        self._update_combos() # 先更新组合框内容
-        
-        # 再设置当前选中项
         self.time_combo.setCurrentText(self.config.get('time_col', ''))
         self.f0_combo.setCurrentText(self.config.get('f0_col', ''))
-        self.group_by_combo.setCurrentText(self.config.get('group_col', '')) # [MODIFIED]
+        self.group_by_combo.setCurrentText(self.config.get('group_col', ''))
 
     def _load_data(self):
         """加载数据文件（Excel或CSV）到DataFrame。"""
@@ -294,23 +337,19 @@ class LayerConfigDialog(QDialog):
             self.data_file_label.setText(os.path.basename(path))
             self.config['data_filename'] = os.path.basename(path)
             
-            # 如果图层名称为空，则使用文件名作为默认名称
             if not self.name_edit.text():
                 self.name_edit.setText(os.path.splitext(os.path.basename(path))[0])
             
-            # [MODIFIED] 当加载新的数据文件时，清除任何已加载的 TextGrid 信息，因为它们可能不再匹配
             self.tg = None
             self.tg_file_label.setText("未选择 (可选)")
-            self.config.pop('tg_filename', None) # 从配置中移除旧的tg文件名
+            self.config.pop('tg_filename', None)
 
-            self._update_combos() # 更新列选择组合框
+            self._update_combos()
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"无法读取数据文件: {e}"); self.df = None
 
-    # [NEW] 从 plotter.py 移植的 TextGrid 加载方法
     def _load_textgrid(self):
         """加载 TextGrid 文件并将其标签应用到 DataFrame。"""
-        # 检查是否已加载数据文件，且数据文件包含 'timestamp' 列
         if self.df is None or 'timestamp' not in self.df.columns:
             QMessageBox.warning(self, "需要时间戳", "请先加载一个包含 'timestamp' 列的数据文件。")
             return
@@ -320,101 +359,99 @@ class LayerConfigDialog(QDialog):
             self.tg = textgrid.TextGrid.fromFile(path)
             self.tg_file_label.setText(os.path.basename(path))
             self.config['tg_filename'] = os.path.basename(path)
-            self._apply_textgrid() # 将 TextGrid 标注应用到 DataFrame
+            self.config['original_tg_path'] = path
+            self._apply_textgrid()
+            self.load_audio_btn.setEnabled(True) 
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"无法解析 TextGrid 文件: {e}"); self.tg = None
+            self.config.pop('original_tg_path', None)
 
-    # [NEW] 从 plotter.py 移植的 TextGrid 应用方法
     def _apply_textgrid(self):
         """将 TextGrid 的标注应用到 DataFrame，创建 'textgrid_label' 列。"""
         if self.df is None or self.tg is None: return
         
-        # 如果已经存在 'textgrid_label' 列，则先移除
         if 'textgrid_label' in self.df.columns:
             self.df = self.df.drop(columns=['textgrid_label'])
 
-        # 创建一个新的 Series 来存储 TextGrid 标签，初始为 NaN
         label_col = pd.Series(np.nan, index=self.df.index, dtype=object)
         
-        # 遍历 TextGrid 的所有 Tier (层) 和 Interval (区间)
         for tier in self.tg:
-            # 只处理 IntervalTier (包含时间区间的标注)
             if isinstance(tier, textgrid.IntervalTier):
                 for interval in tier:
-                    # 如果 Interval 有标注内容且非空
                     if interval.mark and interval.mark.strip(): 
-                        # 使用时间戳匹配 DataFrame 中的数据点
                         mask = (self.df['timestamp'] >= interval.minTime) & (self.df['timestamp'] < interval.maxTime)
-                        label_col.loc[mask] = interval.mark # 将标注赋给匹配的数据点
+                        label_col.loc[mask] = interval.mark
         
-        self.df['textgrid_label'] = label_col # 将新的标签列添加到 DataFrame
-        self._update_combos() # 更新组合框，以便选择新的 'textgrid_label' 列
-        self.group_by_combo.setCurrentText('textgrid_label') # 自动选中 TextGrid 标签作为分组
+        self.df['textgrid_label'] = label_col
+        self._update_combos()
+        self.group_by_combo.setCurrentText('textgrid_label')
 
     def _update_combos(self):
-        """[MODIFIED] 根据当前加载的 DataFrame 更新所有列选择的下拉选项。"""
+        """根据当前加载的 DataFrame 更新所有列选择的下拉选项。"""
         self.time_combo.clear(); self.f0_combo.clear(); self.group_by_combo.clear()
-        self.group_by_combo.addItem("无分组") # 默认分组选项
+        self.group_by_combo.addItem("无分组")
 
         if self.df is None: return
 
         numeric_cols = self.df.select_dtypes(include=np.number).columns.tolist()
-        all_cols = self.df.columns.tolist() # 获取所有列名
+        all_cols = self.df.columns.tolist()
 
         self.time_combo.addItems(numeric_cols); self.f0_combo.addItems(numeric_cols)
         
-        # [MODIFIED] 现在将所有列都添加到分组依据的下拉框中，包括数值列和非数值列
         if all_cols: self.group_by_combo.addItems(all_cols)
 
-        # 尝试自动选择时间/F0列
         time_auto = next((c for c in numeric_cols if 'time' in c.lower() or 'timestamp' in c.lower()), numeric_cols[0] if numeric_cols else "")
         f0_auto = next((c for c in numeric_cols if 'f0' in c.lower() or 'hz' in c.lower()), numeric_cols[1] if len(numeric_cols) > 1 else "")
         self.time_combo.setCurrentText(time_auto); self.f0_combo.setCurrentText(f0_auto)
 
-        # 优先选择 'textgrid_label' 作为分组依据
         if 'textgrid_label' in all_cols: self.group_by_combo.setCurrentText('textgrid_label')
         else: 
-            # 否则尝试选择包含 'group' 或 'label' 的列，最后回退到“无分组”
             self.group_by_combo.setCurrentText(next((c for c in all_cols if 'group' in c.lower() or 'label' in c.lower()), "无分组"))
 
     def get_layer_config(self):
         """
-        获取当前对话框中配置的图层信息。
-        返回一个字典，包含图层名称、DataFrame、TextGrid对象、列名等。
+        [v11.2 - 最终修复版, 与plotter对齐]
+        从UI控件收集信息，并与已有的数据引用合并成最终配置。
         """
-        if self.df is None: QMessageBox.warning(self, "输入无效", "请先加载数据文件."); return None
+        if self.df is None:
+            QMessageBox.warning(self, "输入无效", "请先加载数据文件。")
+            return None
+        
         name = self.name_edit.text().strip()
-        if not name: QMessageBox.warning(self, "输入无效", "请输入图层名称."); return None
+        if not name:
+            QMessageBox.warning(self, "输入无效", "请输入图层名称。")
+            return None
         
-        time_col = self.time_combo.currentText()
-        f0_col = self.f0_combo.currentText()
-        group_col = self.group_by_combo.currentText() # [MODIFIED] 从 QComboBox 获取分组列名
-
-        if not time_col or not f0_col: QMessageBox.warning(self, "输入无效", "请为时间和F0指定数据列."); return None
-        
-        # 收集并保留样式设置 (这些设置将与图层绑定，但实际绘图时可能被全局设置覆盖)
-        current_layer_settings = {
-            "smoothing_enabled": self.config.get('smoothing_enabled', True),
-            "smoothing_window": self.config.get('smoothing_window', 4),
-            "show_points": self.config.get('show_points', False),
-            "point_size": self.config.get('point_size', 10),
-            "point_alpha": self.config.get('point_alpha', 0.4)
+        # 1. 基础数据（不应被UI直接修改的大对象）
+        # 从 self.config 获取 audio_data 确保了引用被正确传递
+        final_config = {
+            'df': self.df,
+            'tg': self.tg,
+            'audio_data': self.config.get('audio_data') 
         }
+
+        # 2. 从UI控件收集的配置
+        ui_config = {
+            "name": name,
+            "data_filename": self.data_file_label.text(),
+            "tg_filename": self.tg_file_label.text(),
+            "audio_path": self.config.get('audio_path'),
+            "time_col": self.time_combo.currentText(),
+            "f0_col": self.f0_combo.currentText(),
+            "group_col": self.group_by_combo.currentText(),
+        }
+
+        # 3. 合并配置
+        # 先继承 self.config 中的所有其他可能存在的键
+        # 再用 ui_config 和 final_config 覆盖，确保是最新的值
+        merged_config = self.config.copy()
+        merged_config.update(final_config)
+        merged_config.update(ui_config)
         
-        # 更新配置字典，并返回
-        self.config.update({
-            "name": name, 
-            "df": self.df, 
-            "tg": self.tg, # [NEW] 保存 TextGrid 对象
-            "data_filename": self.data_file_label.text(), 
-            "tg_filename": self.tg_file_label.text(), # [NEW] 保存 TextGrid 文件名用于显示
-            "time_col": time_col, 
-            "f0_col": f0_col, 
-            "group_col": group_col, # [MODIFIED]
-            "enabled": self.config.get('enabled', True), # 图层默认启用
-            **current_layer_settings
-        })
-        return self.config
+        # 移除 player 键，确保它永远不会被传出去
+        merged_config.pop('player', None)
+        
+        return merged_config
 
 # ==============================================================================
 # 核心UI类：语调可视化器 (VisualizerDialog)
@@ -436,7 +473,7 @@ class VisualizerDialog(QDialog):
     
     # 支持拖拽的文件类型 (增加了 .TextGrid)
     SUPPORTED_EXTENSIONS = ('.csv', '.xlsx', '.xls', '.TextGrid') 
-
+    PLUGIN_LAYER_TYPE = "intonation"
     def __init__(self, parent=None, icon_manager=None):
         """
         初始化语调可视化器对话框。
@@ -452,9 +489,18 @@ class VisualizerDialog(QDialog):
         self.setWindowTitle("语调可视化")
         self.resize(1400, 900); self.setMinimumSize(1200, 750)
         self.icon_manager = icon_manager
-        
+        self.project_temp_dir = None
+        self.plugin_id = "com.phonacq.intonation_visualizer"
+        # --- [核心新增] 获取并存储项目的结果目录路径 ---
+        self.project_results_dir = None
+        if parent and hasattr(parent, 'config'):
+            # 从主窗口的配置中获取 'results_dir'
+            self.project_results_dir = parent.config.get('file_settings', {}).get('results_dir')
+         # [核心新增] 创建一个临时目录用于存放播放的音频片段
+        from tempfile import mkdtemp
+        self.temp_audio_dir = mkdtemp(prefix="visualizer_audio_")       
         # --- 核心数据结构 ---
-        self.layers = [] # 存储所有图层的配置信息 (列表中的每个元素是一个字典)
+        self.layers = []
         self.current_selected_layer_index = -1 # 当前在图层表格中选中的图层索引
         
         # [NEW] 全局分组设置：存储所有活跃分组的样式和启用状态
@@ -464,19 +510,49 @@ class VisualizerDialog(QDialog):
         
         self.plotted_lines = [] # 存储 Matplotlib 绘制的 Line2D 对象，用于鼠标交互 (悬浮提示)
 
-        # --- 交互功能的状态变量 ---
-        self._is_panning = False # 标记是否正在平移图表
-        self._pan_start_pos = None # 平移起始点（数据坐标）
-        self.hover_annotation = None # 用于显示鼠标悬停信息的文本对象
-
+        # --- [核心修改] 新增交互功能的状态变量 ---
+        self._is_panning = False 
+        self._pan_start_pos = None 
+        self.hover_annotation = None
+        self.rect_selector = None # 用于存储矩形选择器实例
+        self.show_ignore_mode_info = True # 用于控制提示框是否显示
+        # --- 结束修改 ---
         # 初始化UI和连接信号
         self._init_ui()
         self._connect_signals()
         self._update_ui_state() # 初始化UI控件的可用状态
+        self.group_table.installEventFilter(self)
         
         # 拖拽功能设置
         self.setAcceptDrops(True)
         self._create_drop_overlay() # 创建拖拽提示覆盖层
+
+    def _get_or_create_analysis_dirs(self):
+        """
+        [v3.5 - 路径简化版]
+        一个健壮的辅助方法，用于获取或创建标准的分析子目录。
+        - 图表现在直接保存到 `charts` 目录，不再创建 `intonation` 子目录。
+        """
+        if not self.project_results_dir or not os.path.isdir(self.project_results_dir):
+            return None, None
+
+        try:
+            analyze_base_dir = os.path.join(self.project_results_dir, 'analyze')
+            
+            # --- [核心修改] ---
+            # 直接使用 charts 目录，不再创建 intonation 子目录
+            charts_dir = os.path.join(analyze_base_dir, 'charts')
+            # --- 结束修改 ---
+            
+            textgrids_dir = os.path.join(analyze_base_dir, 'textgrids')
+
+            os.makedirs(charts_dir, exist_ok=True)
+            os.makedirs(textgrids_dir, exist_ok=True)
+            
+            return charts_dir, textgrids_dir
+        except Exception as e:
+            print(f"[Intonation Visualizer ERROR] Failed to create analysis directories: {e}")
+            return None, None
 
     def _create_drop_overlay(self):
         """创建用于拖拽提示的覆盖层。"""
@@ -542,50 +618,321 @@ class VisualizerDialog(QDialog):
 
     def _create_left_panel(self):
         """
-        [MODIFIED] 创建左侧面板，包含图层管理器和绘图操作按钮。
-        图层表格现在有两列：图层名称和分组依据。
+        [v3.2 - Checkbox恢复版]
+        创建左侧面板。
+        - group_table 恢复为3列，包含“显示”复选框。
+        - 表头仍然隐藏。
         """
-        panel = QWidget(); panel.setFixedWidth(450); layout = QVBoxLayout(panel)
+        panel = QWidget()
+        panel.setFixedWidth(450)
+        layout = QVBoxLayout(panel)
         
-        # 图层管理器组框
-        layer_group = QGroupBox("图层管理器"); layer_layout = QVBoxLayout(layer_group)
+        combined_group = QGroupBox("图层与分组")
+        combined_layout = QVBoxLayout(combined_group)
+
+        splitter = QSplitter(Qt.Vertical)
+
+        layer_container = QWidget()
+        layer_container_layout = QVBoxLayout(layer_container)
+        layer_container_layout.setContentsMargins(0, 0, 0, 0)
+
         self.layer_table = QTableWidget()
-        
-        # [MODIFIED] 表格改为2列：图层名称和分组依据
         self.layer_table.setColumnCount(2)
         self.layer_table.setHorizontalHeaderLabels(["图层名称", "分组依据"])
-        # 图层名称列拉伸，分组依据列可交互调整宽度
         self.layer_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.layer_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
-        self.layer_table.setColumnWidth(1, 120) # 初始宽度
+        self.layer_table.setColumnWidth(1, 120)
+        self.layer_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.layer_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.layer_table.verticalHeader().setVisible(False)
+        self.layer_table.setToolTip("右键单击进行操作，双击名称可配置图层。")
+        self.layer_table.setContextMenuPolicy(Qt.CustomContextMenu)
         
-        self.layer_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.layer_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.layer_table.verticalHeader().setVisible(False); self.layer_table.setToolTip("右键单击进行操作，双击名称可配置图层。"); self.layer_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        btn_layout = QHBoxLayout()
+        self.add_layer_btn = QPushButton(" 添加新图层...")
+        if self.icon_manager:
+            self.add_layer_btn.setIcon(self.icon_manager.get_icon("add_row"))
+        self.add_layer_btn.setAutoDefault(False)
+        btn_layout.addWidget(self.add_layer_btn)
+        btn_layout.addStretch()
         
-        # 添加新图层按钮
-        btn_layout = QHBoxLayout(); self.add_layer_btn = QPushButton(" 添加新图层...")
-        if self.icon_manager: self.add_layer_btn.setIcon(self.icon_manager.get_icon("add_row"))
-        btn_layout.addWidget(self.add_layer_btn); btn_layout.addStretch()
-        layer_layout.addWidget(self.layer_table); layer_layout.addLayout(btn_layout)
+        layer_container_layout.addWidget(self.layer_table)
+        layer_container_layout.addLayout(btn_layout)
+
+        group_container = QWidget()
+        group_container_layout = QVBoxLayout(group_container)
+        group_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.group_table = QTableWidget()
+        # --- [核心修改 1] ---
+        self.group_table.setColumnCount(2) # 名称 和 显示Checkbox
+        self.group_table.horizontalHeader().setVisible(False)
+        self.group_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.group_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents) # Checkbox自适应宽度
+        # --- 结束修改 ---
         
-        # 绘图操作组框
-        action_group = QGroupBox("绘图操作"); action_layout = QVBoxLayout(action_group)
-        self.plot_button = QPushButton(" 更新图表");
-        if self.icon_manager: self.plot_button.setIcon(self.icon_manager.get_icon("chart"))
+        self.group_table.verticalHeader().setVisible(False)
+        self.group_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.group_table.setToolTip("使用Ctrl/Shift进行多选，然后右键单击进行批量操作。")
+        self.group_table.setContextMenuPolicy(Qt.CustomContextMenu)
+
+        self.auto_emphasize_check = QCheckBox("选择即强调 (单选模式)")
+        self.auto_emphasize_check.setToolTip(
+            "勾选此项:\n- 启用“选择即强调”模式。\n- 列表将切换为单选模式以获得最佳性能。\n\n"
+            "取消勾选:\n- 禁用自动强调。\n- 列表将切换回多选模式，以便进行批量操作。"
+        )
+        self.auto_emphasize_check.setChecked(True)
+
+        group_container_layout.addWidget(self.group_table)
+        group_container_layout.addWidget(self.auto_emphasize_check)
+        
+        splitter.addWidget(layer_container)
+        splitter.addWidget(group_container)
+        splitter.setSizes([600, 200])
+
+        combined_layout.addWidget(splitter)
+        layout.addWidget(combined_group, 1)
+
+        action_group = QGroupBox("绘图操作")
+        action_layout = QVBoxLayout(action_group)
+        self.plot_button = QPushButton(" 更新图表")
+        self.plot_button.setToolTip("根据当前的设置重新绘制图表。")
+        if self.icon_manager:
+            self.plot_button.setIcon(self.icon_manager.get_icon("refresh"))
+        self.plot_button.setAutoDefault(False)
+        
         action_layout.addWidget(self.plot_button)
+        layout.addWidget(action_group)
         
-        layout.addWidget(layer_group, 1); layout.addWidget(action_group)
         return panel
+
+    def _save_project_to_file(self, plugin_id, target_filepath):
+        """
+        [内置完整版] 将当前对话框的状态保存为 .pavp 工程文件。
+        """
+        import tempfile, shutil, os, json, uuid, pandas as pd
+        from datetime import datetime
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = os.path.join(temp_dir, 'data')
+            textgrids_dir = os.path.join(temp_dir, 'textgrids')
+            audio_dir = os.path.join(temp_dir, 'audio')
+            os.makedirs(data_dir); os.makedirs(textgrids_dir); os.makedirs(audio_dir)
+
+            json_layers = []
+            for layer_config in self.layers:
+                layer_id = layer_config.get('id', str(uuid.uuid4()))
+                layer_config['id'] = layer_id
+
+                df = layer_config.get('df')
+                data_source_path = None
+                if df is not None and not df.empty:
+                    csv_filename = f"{layer_id}.csv"
+                    df.to_csv(os.path.join(data_dir, csv_filename), index=False)
+                    data_source_path = f"data/{csv_filename}"
+
+                tg_path_relative = None
+                original_tg_path = layer_config.get('original_tg_path')
+                if original_tg_path and os.path.exists(original_tg_path):
+                     tg_filename = os.path.basename(original_tg_path)
+                     shutil.copy(original_tg_path, os.path.join(textgrids_dir, tg_filename))
+                     tg_path_relative = f"textgrids/{tg_filename}"
+
+                audio_path_relative = None
+                original_audio_path = layer_config.get('audio_path')
+                if original_audio_path and os.path.exists(original_audio_path):
+                     audio_filename = os.path.basename(original_audio_path)
+                     shutil.copy(original_audio_path, os.path.join(audio_dir, audio_filename))
+                     audio_path_relative = f"audio/{audio_filename}"
+
+                json_layer = {
+                    "id": layer_id, "name": layer_config['name'],
+                    "type": self.PLUGIN_LAYER_TYPE,
+                    "data_source_path": data_source_path,
+                    "textgrid_path": tg_path_relative,
+                    "audio_path": audio_path_relative,
+                    "config": {"enabled": layer_config.get('enabled', True)},
+                    "plugin_specific_config": {
+                        plugin_id: self.get_plugin_specific_layer_config(layer_config)
+                    }
+                }
+                json_layers.append(json_layer)
+
+            project_json = {
+                "project_format_version": "2.0", "pavp_version": "1.0",
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_by_plugin": plugin_id,
+                "global_settings": self.get_global_settings(),
+                "plugin_specific_settings": {
+                    plugin_id: self.get_plugin_specific_global_settings()
+                },
+                "layers": json_layers
+            }
+            with open(os.path.join(temp_dir, 'project.json'), 'w', encoding='utf-8') as f:
+                json.dump(project_json, f, indent=4)
+            
+            base_name = os.path.splitext(target_filepath)[0]
+            zip_path = shutil.make_archive(base_name, 'zip', temp_dir)
+            if os.path.exists(target_filepath):
+                os.remove(target_filepath)
+            os.rename(zip_path, target_filepath)
+
+    def _open_project_from_file(self, filepath):
+        """
+        [内置完整版] 打开一个 .pavp 工程文件并返回其内容和临时解压路径。
+        """
+        import tempfile, shutil, os, json, zipfile
+        
+        if hasattr(self, 'project_temp_dir') and self.project_temp_dir:
+            shutil.rmtree(self.project_temp_dir, ignore_errors=True)
+
+        temp_dir = tempfile.mkdtemp(prefix="pavp_proj_")
+        
+        try:
+            with zipfile.ZipFile(filepath, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+            
+            project_json_path = os.path.join(temp_dir, 'project.json')
+            if not os.path.exists(project_json_path):
+                raise FileNotFoundError("工程文件损坏：缺少 project.json。")
+                
+            with open(project_json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            return data, temp_dir
+        except Exception as e:
+            shutil.rmtree(temp_dir)
+            raise e
+
+    def get_global_settings(self):
+        """
+        [完整版] 辅助方法: 收集所有通用全局设置。
+        """
+        return {
+            "title": self.title_edit.text(),
+            "xlabel": self.xlabel_edit.text(),
+            "ylabel": self.ylabel_edit.text(),
+            "show_legend": self.show_legend_check.isChecked(),
+        }
+
+    def get_plugin_specific_global_settings(self):
+        """
+        [完整版] 辅助方法: 收集本插件专属的全局设置。
+        """
+        return {
+            "normalize_time": self.normalize_time_check.isChecked(),
+            "interpolate_gaps": self.interpolate_gaps_check.isChecked(),
+            "f0_normalization": {
+                "method": self.norm_combo.currentText(),
+                "st_ref_hz": self.st_ref_edit.text(),
+                "z_score_scope": self.z_scope_combo.currentText(),
+            },
+            "mean_contour": {
+                "enabled": self.show_mean_contour_check.isChecked(),
+                "average_only": self.show_average_only_check.isChecked(),
+            }
+        }
+
+    def get_plugin_specific_layer_config(self, layer_config):
+        """
+        [完整版] 辅助方法: 收集本插件专属的所有图层设置。
+        """
+        return {
+            "time_col": layer_config.get('time_col'),
+            "f0_col": layer_config.get('f0_col'),
+            "group_col": layer_config.get('group_col'),
+            "smoothing_enabled": layer_config.get('smoothing_enabled', True),
+            "smoothing_window": layer_config.get('smoothing_window', 4),
+            "show_points": layer_config.get('show_points', False),
+            "point_size": layer_config.get('point_size', 10),
+            "point_alpha": layer_config.get('point_alpha', 0.4),
+        }
+
+    def _restore_state_from_pavp(self, data, temp_dir):
+        """
+        [完整版] 根据.pavp文件恢复整个对话框的状态。
+        """
+        import pandas as pd
+        import librosa
+        import textgrid
+        from itertools import cycle
+        from PyQt5.QtGui import QColor
+
+        self._clear_all_data()
+        self.project_temp_dir = temp_dir
+        
+        # 恢复通用全局设置
+        gs = data.get('global_settings', {})
+        self.title_edit.setText(gs.get('title', '语调曲线对比'))
+        self.xlabel_edit.setText(gs.get('xlabel', '时间'))
+        self.ylabel_edit.setText(gs.get('ylabel', 'F0'))
+        self.show_legend_check.setChecked(gs.get('show_legend', True))
+
+        # 恢复插件专属全局设置
+        ps = data.get('plugin_specific_settings', {}).get(self.plugin_id, {})
+        self.normalize_time_check.setChecked(ps.get('normalize_time', False))
+        self.interpolate_gaps_check.setChecked(ps.get('interpolate_gaps', True))
+        
+        f0_norm = ps.get('f0_normalization', {})
+        self.norm_combo.setCurrentText(f0_norm.get('method', "原始值 (Hz)"))
+        self.st_ref_edit.setText(f0_norm.get('st_ref_hz', '100'))
+        self.z_scope_combo.setCurrentText(f0_norm.get('z_score_scope', "按分组"))
+        
+        mean_contour = ps.get('mean_contour', {})
+        self.show_mean_contour_check.setChecked(mean_contour.get('enabled', False))
+        self.show_average_only_check.setChecked(mean_contour.get('average_only', False))
+        
+        # 恢复图层数据模型
+        for layer_json in data.get('layers', []):
+            if layer_json.get('type') != self.PLUGIN_LAYER_TYPE:
+                continue
+            
+            layer_config = {}
+            layer_config.update(layer_json.get('config', {}))
+            layer_config.update(layer_json.get('plugin_specific_config', {}).get(self.plugin_id, {}))
+            layer_config['id'] = layer_json.get('id', str(uuid.uuid4()))
+            layer_config['name'] = layer_json.get('name', '未命名图层')
+            
+            if layer_json.get('data_source_path'):
+                csv_path = os.path.join(temp_dir, layer_json['data_source_path'])
+                if os.path.exists(csv_path):
+                    layer_config['df'] = pd.read_csv(csv_path)
+                    layer_config['data_filename'] = f"{layer_json['name']} (来自工程)"
+
+            predefined_tg_path = None
+            if layer_json.get('textgrid_path'):
+                predefined_tg_path = os.path.join(temp_dir, layer_json['textgrid_path'])
+            self._auto_match_textgrid_for_layer(layer_config, predefined_tg_path)
+            
+            if layer_json.get('audio_path'):
+                audio_path_abs = os.path.join(temp_dir, layer_json['audio_path'])
+                if os.path.exists(audio_path_abs):
+                    try:
+                        y, sr = librosa.load(audio_path_abs, sr=None, mono=True)
+                        layer_config['audio_data'] = (y, sr)
+                        layer_config['audio_path'] = audio_path_abs
+                    except Exception as e:
+                         print(f"Error loading audio for layer '{layer_config['name']}': {e}")
+            
+            self.layers.append(layer_config)
+
+        # 所有数据模型加载完毕后，进行一次性的、彻底的UI刷新
+        self._update_layer_table()
+        self._update_all_group_settings()
+
+        if self.layers:
+            self.layer_table.selectRow(0)
+        
+        self._update_plot()
 
     def _create_right_panel(self):
         """
-        [MODIFIED] 创建右侧面板，包含全局设置、图层设置和全局分组样式面板。
-        布局与 plotter.py 对齐。
+        [v3.1 - UI对齐plotter版]
+        创建右侧面板，将全局分组样式面板恢复到此处。
         """
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFixedWidth(420); scroll.setFrameShape(QScrollArea.NoFrame)
         panel = QWidget(); layout = QVBoxLayout(panel); scroll.setWidget(panel)
 
-        # --- 全局设置组框 ---
         global_group = QGroupBox("全局设置"); global_layout = QFormLayout(global_group)
         self.title_edit = QLineEdit("语调曲线对比"); self.xlabel_edit = QLineEdit("时间"); self.ylabel_edit = QLineEdit("F0")
         self.title_edit.setToolTip("设置图表的总标题。"); self.xlabel_edit.setToolTip("设置图表 X 轴的标签文本。"); self.ylabel_edit.setToolTip("设置图表 Y 轴的标签文本。")
@@ -600,106 +947,97 @@ class VisualizerDialog(QDialog):
         self.interpolate_gaps_check = QCheckBox("插值填充F0间隙"); self.interpolate_gaps_check.setChecked(True); self.interpolate_gaps_check.setToolTip("勾选后，将使用线性插值填充F0数据中的无声间隙(NaN)，\n使曲线看起来更连续、平滑。")
         global_layout.addRow(self.interpolate_gaps_check)
 
-        # F0归一化设置
         self.norm_combo = QComboBox(); self.norm_combo.addItems(["原始值 (Hz)", "半音 (Semitone)", "Z-Score"])
-        self.norm_combo.setToolTip("选择对F0值进行变换的方式：\n- 原始值: 不做任何处理。\n- 半音: 转换为对数尺度的半音，基准通常为100Hz或某个平均值。\n- Z-Score: 对F0进行标准化，消除个体音高差异。")
+        self.norm_combo.setToolTip("选择对F0值进行变换的方式：\n- 原始值: 不做任何处理。\n- 半音: 转换为对数尺度的半音。\n- Z-Score: 对F0进行标准化。")
         
         self.st_ref_edit = QLineEdit("100"); self.st_ref_edit.setToolTip("半音归一化的参考基频，单位Hz。")
         self.st_param_widget = QWidget(); st_layout = QHBoxLayout(self.st_param_widget); st_layout.setContentsMargins(0,0,0,0); st_layout.addWidget(QLabel("基准(Hz):")); st_layout.addWidget(self.st_ref_edit)
         
         self.z_scope_combo = QComboBox(); self.z_scope_combo.addItems(["按分组", "按整个数据集"])
-        self.z_scope_combo.setToolTip("Z-Score归一化的统计范围：\n- 按分组: 对每个分组内的F0数据独立计算均值和标准差。\n- 按整个数据集: 对所有可见图层的所有F0数据计算一个总体的均值和标准差。")
+        self.z_scope_combo.setToolTip("Z-Score归一化的统计范围。")
         self.z_param_widget = QWidget(); z_layout = QHBoxLayout(self.z_param_widget); z_layout.setContentsMargins(0,0,0,0); z_layout.addWidget(QLabel("范围:")); z_layout.addWidget(self.z_scope_combo)
         
-        self.st_param_widget.setVisible(False); self.z_param_widget.setVisible(False) # 初始隐藏
+        self.st_param_widget.setVisible(False); self.z_param_widget.setVisible(False)
         
         global_layout.addRow("F0归一化:", self.norm_combo); global_layout.addRow(self.st_param_widget); global_layout.addRow(self.z_param_widget)
 
-        # --- 图层设置组框 (简化版) ---
         self.layer_settings_group = QGroupBox("图层设置 (未选择图层)")
-        self.layer_settings_group.setEnabled(False) # 默认禁用
+        self.layer_settings_group.setEnabled(False)
         layer_settings_layout = QVBoxLayout(self.layer_settings_group)
         
-        # 曲线平滑设置
         self.smoothing_group = QGroupBox("曲线平滑 (移动平均)")
         self.smoothing_group.setCheckable(True); self.smoothing_group.setChecked(True)
         self.smoothing_group.setToolTip("勾选后，对当前图层的F0曲线进行移动平均平滑。")
         smoothing_layout = QFormLayout(self.smoothing_group)
         self.smoothing_window_slider = QSlider(Qt.Horizontal)
-        self.smoothing_window_slider.setRange(1, 25); self.smoothing_window_slider.setValue(4) # 默认4，对应 (2*4+1)=9点窗口
-        self.smoothing_window_slider.setToolTip("移动平均的窗口大小（半长），最终窗口大小为 2*值+1。\n值越大曲线越平滑。")
-        self.smoothing_label = QLabel("窗口: 9 点") # 实时显示窗口大小
+        self.smoothing_window_slider.setRange(1, 25); self.smoothing_window_slider.setValue(4)
+        self.smoothing_window_slider.setToolTip("移动平均的窗口大小（半长），最终窗口大小为 2*值+1。")
+        self.smoothing_label = QLabel("窗口: 9 点")
         smoothing_layout.addRow(self.smoothing_label, self.smoothing_window_slider)
         
-        # 数据点显示设置
         self.display_group = QGroupBox("显示选项")
         display_layout = QFormLayout(self.display_group)
         self.show_points_check = QCheckBox("显示数据点"); self.show_points_check.setToolTip("勾选后，在当前图层的F0曲线上方显示原始的F0数据点。")
         self.point_size_slider = QSlider(Qt.Horizontal); self.point_size_slider.setRange(2, 50); self.point_size_slider.setValue(10); self.point_size_slider.setToolTip("调整当前图层数据点的大小。")
-        self.point_alpha_slider = QSlider(Qt.Horizontal); self.point_alpha_slider.setRange(10, 100); self.point_alpha_slider.setValue(40); self.point_alpha_slider.setToolTip("调整当前图层数据点的不透明度，值越小越透明。")
+        self.point_alpha_slider = QSlider(Qt.Horizontal); self.point_alpha_slider.setRange(10, 100); self.point_alpha_slider.setValue(40); self.point_alpha_slider.setToolTip("调整当前图层数据点的不透明度。")
         display_layout.addRow(self.show_points_check); display_layout.addRow("点大小:", self.point_size_slider); display_layout.addRow("点透明度:", self.point_alpha_slider)
         
         layer_settings_layout.addWidget(self.smoothing_group); layer_settings_layout.addWidget(self.display_group)
 
-        # --- [NEW] 全局分组样式面板 (从 plotter.py 移植) ---
+        # --- [核心修改 3] 恢复全局分组样式面板 ---
         self.grouping_group = QGroupBox("全局分组样式 (颜色区分)")
         self.grouping_group.setToolTip("为所有图层中具有相同标签的分组设置统一的颜色和显示状态。")
         grouping_layout = QVBoxLayout(self.grouping_group)
         
-        # 颜色方案选择
         color_scheme_layout = QHBoxLayout(); self.color_scheme_combo = QComboBox(); self.color_scheme_combo.addItems(self.COLOR_SCHEMES.keys()); self.apply_color_scheme_btn = QPushButton("应用"); color_scheme_layout.addWidget(self.color_scheme_combo); color_scheme_layout.addWidget(self.apply_color_scheme_btn)
         
-        # 动态生成的分组颜色和复选框会放在这里
-        # 动态生成的分组颜色和复选框会放在这里
         self.group_settings_scroll = QScrollArea()
         self.group_settings_scroll.setWidgetResizable(True)
         self.group_settings_scroll.setFrameShape(QScrollArea.NoFrame)
-        
-        # --- [核心修复-步骤1] ---
-        # 为滚动区域设置一个最小高度，确保即使只有一个分组时也不会太扁。
-        # 150px 是一个比较合理的经验值。
         self.group_settings_scroll.setMinimumHeight(150)
         
         self.group_settings_widget = QWidget()
         self.group_settings_layout = QVBoxLayout(self.group_settings_widget)
         self.group_settings_scroll.setWidget(self.group_settings_widget)
         
-
-        
-        self.show_mean_contour_check = QCheckBox("显示分组平均轮廓"); self.show_mean_contour_check.setToolTip("勾选后，将为每个分组计算并绘制一条平均语调轮廓线。\n(必须勾选时间归一化)")
-        
-        grouping_layout.addLayout(color_scheme_layout); grouping_layout.addWidget(self.group_settings_scroll)
-                # --- [核心修改-步骤1] 创建两个复选框 ---
         self.show_mean_contour_check = QCheckBox("显示分组平均轮廓")
         self.show_mean_contour_check.setToolTip("勾选后，将为每个分组计算并绘制一条平均语调轮廓线。\n(必须勾选时间归一化)")
         
         self.show_average_only_check = QCheckBox("仅显示平均值")
-        self.show_average_only_check.setToolTip("勾选后，将隐藏所有原始的语调曲线，只显示平均轮廓线，\n便于观察总体趋势。")
-        self.show_average_only_check.setEnabled(False) # 初始状态下禁用
+        self.show_average_only_check.setToolTip("勾选后，将隐藏所有原始的语调曲线，只显示平均轮廓线。")
+        self.show_average_only_check.setEnabled(False)
 
-        # --- [核心修改-步骤2] 创建一个水平布局来容纳它们 ---
         mean_contour_layout = QHBoxLayout()
         mean_contour_layout.addWidget(self.show_mean_contour_check)
         mean_contour_layout.addWidget(self.show_average_only_check)
-        mean_contour_layout.addStretch() # 添加弹簧，将它们推到左侧
+        mean_contour_layout.addStretch()
         
         grouping_layout.addLayout(color_scheme_layout)
         grouping_layout.addWidget(self.group_settings_scroll)
-        grouping_layout.addLayout(mean_contour_layout) # <-- [核心修改] 添加新的水平布局
+        grouping_layout.addLayout(mean_contour_layout)
+        # --- 结束修改 ---
 
-        # 将所有组框添加到右侧面板的主布局
         layout.addWidget(global_group); layout.addWidget(self.layer_settings_group); layout.addWidget(self.grouping_group); layout.addStretch()
         return scroll
 
     def _connect_signals(self):
         """连接所有UI控件的信号到槽函数。"""
-        # 左侧面板 - 图层管理
+        # --- 左侧面板 - 图层管理 ---
         self.add_layer_btn.clicked.connect(self._add_layer)
-        self.layer_table.customContextMenuRequested.connect(self._show_layer_context_menu) # 右键菜单
-        self.layer_table.itemDoubleClicked.connect(self._on_layer_double_clicked) # 双击配置
-        self.layer_table.itemChanged.connect(self._on_layer_renamed) # 重命名完成
-        self.layer_table.itemSelectionChanged.connect(self._on_layer_selection_changed) # 选中行变化
-        self.plot_button.clicked.connect(self._update_plot) # 更新图表
+        self.layer_table.customContextMenuRequested.connect(self._show_layer_context_menu)
+        self.layer_table.itemDoubleClicked.connect(self._on_layer_double_clicked)
+        # [核心修改] 移除了下面这一行，以禁用双击重命名
+        # self.layer_table.itemChanged.connect(self._on_layer_renamed)
+        self.layer_table.itemSelectionChanged.connect(self._on_layer_selection_changed)
+        
+        # [核心修改] 将 plot_button 连接到新的处理器
+        self.plot_button.clicked.connect(self._update_plot)
+        self.group_table.customContextMenuRequested.connect(self._show_group_context_menu_global)
+        # [核心修改] 恢复交互模式切换的信号连接
+        self.auto_emphasize_check.toggled.connect(self._on_auto_emphasize_toggled)
+        # 初始化一次，以设置初始的选择模式和信号连接
+        self._on_auto_emphasize_toggled(self.auto_emphasize_check.isChecked())
+
         self.show_all_data_check.stateChanged.connect(self._on_layer_selection_changed)
 
         # 右侧 - 全局设置
@@ -731,43 +1069,101 @@ class VisualizerDialog(QDialog):
         self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
         # 这里没有实现滚轮缩放的直接信号连接，而是通过重写 wheelEvent 处理
 
-    def wheelEvent(self, event):
-        """处理鼠标滚轮事件，用于缩放图表（Qt事件）。"""
-        # 仅当鼠标在图表上且按下了Ctrl键时触发
-        if self.canvas.underMouse() and event.modifiers() == Qt.ControlModifier:
+    def _on_auto_emphasize_toggled(self, checked):
+        """
+        [新增] 当“选择即强调”模式切换时调用。
+        """
+        if checked:
+            # 启用“选择即强调”模式 -> 单选
+            self.group_table.setSelectionMode(QAbstractItemView.SingleSelection)
+            self.group_table.setToolTip("单击选择以动态强调曲线。")
             try:
-                ax = self.figure.gca() # 获取当前激活的坐标轴
+                self.group_table.itemSelectionChanged.disconnect(self._on_group_selection_changed)
+            except TypeError: pass
+            self.group_table.itemSelectionChanged.connect(self._on_group_selection_changed)
+            self._on_group_selection_changed()
+
+        else:
+            # 禁用“选择即强调”模式 -> 多选
+            self.group_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            self.group_table.setToolTip("使用Ctrl/Shift进行多选，然后右键单击进行批量操作。")
+            try:
+                self.group_table.itemSelectionChanged.disconnect(self._on_group_selection_changed)
+            except TypeError: pass
+
+    def _on_group_selection_changed(self):
+        """
+        [v3.3 - 图层隔离强调版]
+        在“选择即强调”模式下，当分组表格中的选择项发生变化时调用。
+        此版本只修改当前选中图层的强调状态，实现了图层隔离。
+        """
+        layer_row = self.current_selected_layer_index
+        if layer_row < 0 or layer_row >= len(self.layers): return
+        layer_config = self.layers[layer_row]
+        
+        all_groups_in_layer = layer_config.get('groups', {})
+        if not all_groups_in_layer: return
+
+        selected_items = self.group_table.selectedItems()
+        selected_group_name = selected_items[0].text() if selected_items else None
+
+        # 遍历当前图层内的所有分组，并更新它们的 'emphasized' 状态
+        for group_name, settings in all_groups_in_layer.items():
+            settings['emphasized'] = (group_name == selected_group_name)
+        
+        # 刷新UI以反映变化
+        self._update_group_table() # 更新左侧列表的强调图标
+        self._update_plot()      # 重绘图表以应用新的强调样式
+
+    def wheelEvent(self, event):
+        """
+        [v2.2 - 坐标系修正最终版] 处理鼠标滚轮事件，实现以鼠标为中心的单轴缩放。
+        """
+        modifiers = event.modifiers()
+        is_ctrl_pressed = modifiers & Qt.ControlModifier
+        is_shift_pressed = modifiers & Qt.ShiftModifier
+
+        if self.canvas.underMouse() and (is_ctrl_pressed or is_shift_pressed):
+            try:
+                ax = self.figure.gca()
                 
-                # 将Qt事件的像素坐标转换为Matplotlib的数据坐标
-                # event.pos() 给出的是 QPoint，event.x(), event.y() 给出的是 int
-                # self.canvas.height() - event.y() 是因为Qt的Y轴向下，Matplotlib的Y轴向上
-                x_pixel, y_pixel = event.x(), self.canvas.height() - event.y() 
-                
-                # Matplotlib的transform_point需要的是(x_pixel, y_pixel)
+                # --- [核心修正] 坐标系转换 ---
+                global_pos = event.globalPos()
+                canvas_local_pos = self.canvas.mapFromGlobal(global_pos)
+                x_pixel = canvas_local_pos.x()
+                y_pixel = self.canvas.height() - canvas_local_pos.y()
+                # --- 修正结束 ---
+
                 trans = ax.transData.inverted()
                 mouse_x, mouse_y = trans.transform_point((x_pixel, y_pixel))
-
-                cur_xlim = ax.get_xlim(); cur_ylim = ax.get_ylim()
-
-                # 根据滚轮方向确定缩放比例
-                # event.angleDelta().y() > 0 表示向上滚动（放大），< 0 表示向下滚动（缩小）
+                
                 zoom_factor = 1.1 if event.angleDelta().y() > 0 else 1 / 1.1
 
-                # 计算新的坐标轴范围，以鼠标位置为中心进行缩放
-                new_xlim = [
-                    mouse_x - (mouse_x - cur_xlim[0]) / zoom_factor,
-                    mouse_x + (cur_xlim[1] - mouse_x) / zoom_factor
-                ]
-                new_ylim = [
-                    mouse_y - (mouse_y - cur_ylim[0]) / zoom_factor,
-                    mouse_y + (cur_ylim[1] - mouse_y) / zoom_factor
-                ]
+                if is_ctrl_pressed:
+                    cur_xlim = ax.get_xlim()
+                    left_dist = mouse_x - cur_xlim[0]
+                    right_dist = cur_xlim[1] - mouse_x
+                    new_xlim = [
+                        mouse_x - left_dist / zoom_factor,
+                        mouse_x + right_dist / zoom_factor
+                    ]
+                    ax.set_xlim(new_xlim)
+                
+                elif is_shift_pressed:
+                    cur_ylim = ax.get_ylim()
+                    bottom_dist = mouse_y - cur_ylim[0]
+                    top_dist = cur_ylim[1] - mouse_y
+                    new_ylim = [
+                        mouse_y - bottom_dist / zoom_factor,
+                        mouse_y + top_dist / zoom_factor
+                    ]
+                    ax.set_ylim(new_ylim)
 
-                ax.set_xlim(new_xlim); ax.set_ylim(new_ylim); self.canvas.draw()
+                self.canvas.draw()
             except Exception as e:
-                print(f"Zoom failed: {e}")
+                if 'nan' not in str(e).lower():
+                    print(f"Single-axis zoom failed in visualizer: {e}")
         else:
-            # 如果不是Ctrl+滚轮在图表上，则将事件传递给父类处理（例如滚动滚动条）
             super().wheelEvent(event)
 
     # ==========================================================================
@@ -790,17 +1186,22 @@ class VisualizerDialog(QDialog):
         # 3. 触发重绘
         self._update_plot()
     def _add_layer(self):
-        """打开 LayerConfigDialog 添加新图层。"""
+        """
+        [v2.1 - 自动匹配版]
+        打开 LayerConfigDialog 添加新图层，并在成功后立即尝试自动匹配TextGrid。
+        """
         dialog = LayerConfigDialog(parent=self)
         if dialog.exec_() == QDialog.Accepted:
             config = dialog.get_layer_config()
             if config:
-                # 添加新图层
+                # [核心新增] 调用自动匹配
+                self._auto_match_textgrid_for_layer(config)
+
                 self.layers.append(config)
-                self._update_layer_table() # 更新图层列表UI
-                self._update_ui_state() # 更新UI状态（如按钮启用状态）
-                self._update_all_group_settings() # [NEW] 扫描新图层以更新全局分组
-                self._update_plot() # 重新绘图
+                self._update_layer_table()
+                self._update_ui_state()
+                self._update_all_group_settings()
+                self._update_plot()
 
     def _remove_layer(self, row_to_remove=None):
         """移除指定行或当前选中行的图层。"""
@@ -824,20 +1225,40 @@ class VisualizerDialog(QDialog):
         self._update_plot() # 移除图层后重绘
 
     def _config_layer(self, row_to_config=None):
-        """配置指定行或当前选中行的图层。"""
+        """
+        [v11.1 - 延迟加载修复版]
+        配置图层。在对话框返回后，如果音频路径发生变化，则在此处加载音频。
+        """
         current_row = row_to_config if row_to_config is not None else self.layer_table.currentRow()
-        if current_row < 0: return # 没有选中行或无效行
+        if current_row < 0: return
         
         config_to_edit = self.layers[current_row]
+
         dialog = LayerConfigDialog(existing_config=config_to_edit, parent=self)
-        if dialog.exec_() == QDialog.Accepted:
-            new_config = dialog.get_layer_config() # 获取更新后的配置
+        if dialog.exec() == QDialog.Accepted:
+            new_config = dialog.get_layer_config()
             if new_config:
-                self.layers[current_row] = new_config # 更新图层列表中的配置
-                self._update_layer_table_row(current_row) # 只更新该行UI
-                self._on_layer_selection_changed() # 模拟选择变化，刷新右侧面板
-                self._update_all_group_settings() # [NEW] 更新全局分组
-                self._update_plot() # 配置可能影响图表，重绘
+                # --- 实现延迟加载 ---
+                old_path = config_to_edit.get('audio_path')
+                new_path = new_config.get('audio_path')
+
+                if new_path and (new_path != old_path or 'audio_data' not in new_config or new_config['audio_data'] is None):
+                    self.parent().statusBar().showMessage(f"正在后台加载音频: {os.path.basename(new_path)}...", 3000)
+                    try:
+                        import librosa
+                        y, sr = librosa.load(new_path, sr=None, mono=True)
+                        new_config['audio_data'] = (y, sr)
+                        self.parent().statusBar().showMessage(f"音频 '{os.path.basename(new_path)}' 加载成功。", 3000)
+                    except Exception as e:
+                        QMessageBox.critical(self, "音频加载失败", f"无法加载文件 {new_path}:\n{e}")
+                        new_config['audio_data'] = None
+                        new_config['audio_path'] = None
+                
+                self.layers[current_row] = new_config
+                self._update_layer_table_row(current_row)
+                self._on_layer_selection_changed()
+                self._update_all_group_settings()
+                self._update_plot()
 
     def _update_layer_table(self):
         """刷新整个图层表格 UI。"""
@@ -856,38 +1277,40 @@ class VisualizerDialog(QDialog):
 
     def _update_layer_table_row(self, row):
         """
-        [MODIFIED] 更新图层表格中指定行的内容。
-        现在有两列：图层名称和分组依据。
+        [v2.0 - UI对齐重构版]
+        更新图层表格中指定行的内容。
+        - 现在有两列：图层名称和分组依据。
+        - 名称列被设置为不可在表格内直接编辑。
         """
-        if row >= len(self.layers): return # 越界检查
+        if row >= len(self.layers): return
         layer = self.layers[row]
         
-        # 确保行存在
         if row >= self.layer_table.rowCount():
             self.layer_table.insertRow(row)
         
-        # Column 0: 图层名称 (可编辑，包含显示/隐藏图标)
+        # Column 0: 图层名称 (不可编辑，包含显示/隐藏图标)
         name_item = QTableWidgetItem(layer['name'])
-        name_item.setFlags(name_item.flags() | Qt.ItemIsEditable) 
+        # [核心修改] 明确设置为不可编辑，统一交互
+        name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable) 
+        
         is_enabled = layer.get('enabled', True)
         if self.icon_manager:
             icon_name = "success" if is_enabled else "hidden"
             name_item.setIcon(self.icon_manager.get_icon(icon_name))
         
-        # 设置 Tooltip (显示更多图层信息)
         tooltip_parts = [f"<b>图层: {layer['name']}</b><hr>"]
         df = layer.get('df')
         tooltip_parts.append(f"<b>数据源:</b> {layer.get('data_filename', 'N/A')} ({len(df)}点)" if df is not None else "<b>数据源:</b> 无")
-        tooltip_parts.append(f"<b>TextGrid:</b> {layer.get('tg_filename', 'N/A')}" if layer.get('tg') else "<b>TextGrid:</b> 无") # [NEW]
+        tooltip_parts.append(f"<b>TextGrid:</b> {layer.get('tg_filename', 'N/A')}" if layer.get('tg') else "<b>TextGrid:</b> 无")
         tooltip_parts.append(f"<b>时间列:</b> {layer.get('time_col', 'N/A')}")
         tooltip_parts.append(f"<b>F0列:</b> {layer.get('f0_col', 'N/A')}")
         tooltip_parts.append(f"<b>分组依据:</b> {layer.get('group_col', '无分组')}")
         name_item.setToolTip("\n".join(tooltip_parts))
         self.layer_table.setItem(row, 0, name_item)
         
-        # Column 1: 分组依据 (不可直接编辑，但显示分组列名)
+        # Column 1: 分组依据 (不可编辑)
         group_item = QTableWidgetItem(layer.get('group_col', '无分组'))
-        group_item.setFlags(group_item.flags() & ~Qt.ItemIsEditable) # 不在表格中直接编辑分组列
+        group_item.setFlags(group_item.flags() & ~Qt.ItemIsEditable)
         self.layer_table.setItem(row, 1, group_item)
 
     def _show_layer_context_menu(self, pos):
@@ -1124,40 +1547,138 @@ class VisualizerDialog(QDialog):
 
     def _on_layer_selection_changed(self):
         """
-        [MODIFIED] 处理图层列表选中行变化。
-        现在会根据复选框状态决定是显示完整数据还是仅显示有效标注数据。
+        [v3.3 - 标题截断版]
+        处理图层列表选中行变化。
+        - 调用新的 _update_layer_settings_panel_title 来处理长标题。
         """
         self.current_selected_layer_index = self.layer_table.currentRow()
         row = self.current_selected_layer_index
 
         if row > -1 and row < len(self.layers):
             layer_config = self.layers[row]
-            
-            # --- [核心修复] ---
             df_to_show = layer_config.get('df', pd.DataFrame())
 
-            # 只有当用户未勾选“显示所有数据”时，才进行过滤
             if not self.show_all_data_check.isChecked():
-                # 检查是否存在 'textgrid_label' 列，并且 DataFrame 不为空
                 if df_to_show is not None and not df_to_show.empty and 'textgrid_label' in df_to_show.columns:
-                    # 使用 .dropna() 过滤掉 'textgrid_label' 列中值为 NaN 的行
                     df_to_show = df_to_show.dropna(subset=['textgrid_label'])
 
-            # 更新数据预览表格
             self.table_view.setModel(PandasModel(df_to_show))
-            
-            # ... (填充右侧面板的逻辑保持不变) ...
             self._populate_layer_settings_panel(layer_config)
-            self.layer_settings_group.setTitle(f"图层设置 ({layer_config['name']})")
+            # --- [核心修改 3] 调用新的标题更新方法 ---
+            self._update_layer_settings_panel_title()
             self.layer_settings_group.setEnabled(True)
-
         else:
-            # 没有选中行或图层被移除，清空预览并禁用右侧面板
             self.table_view.setModel(None)
             self.layer_settings_group.setTitle("图层设置 (未选择图层)")
             self.layer_settings_group.setEnabled(False)
-            
+        
+        self._update_group_table()
         self._update_ui_state()
+
+    def _update_layer_settings_panel_title(self):
+        """
+        [v3.4 - 暴力截断版]
+        更新右侧图层设置面板的标题。
+        如果标题超过15个字符，则暴力截断为 "首6...尾6" 的格式。
+        """
+        row = self.current_selected_layer_index
+        if row > -1 and row < len(self.layers):
+            layer_config = self.layers[row]
+            base_title = layer_config['name']
+            is_locked = layer_config.get('locked', False)
+            
+            # --- [核心修改] 暴力截断逻辑 ---
+            if len(base_title) > 15:
+                truncated_title = f"{base_title[:6]}...{base_title[-6:]}"
+            else:
+                truncated_title = base_title
+            # --- 结束修改 ---
+            
+            final_title = f"图层设置 ({truncated_title})"
+            if is_locked:
+                final_title += " (已锁定)"
+            self.layer_settings_group.setTitle(final_title)
+        else:
+            self.layer_settings_group.setTitle("图层设置 (未选择图层)")
+
+    def _update_group_table(self):
+        """
+        [v3.3 - 图层隔离强调版]
+        根据当前选中的图层，刷新左侧的分组列表。
+        - “强调”状态现在从图层自身的配置中读取。
+        """
+        self.group_table.blockSignals(True)
+        self.group_table.setRowCount(0)
+
+        row = self.current_selected_layer_index
+        if row < 0 or row >= len(self.layers):
+            self.group_table.setEnabled(False)
+            self.group_table.blockSignals(False)
+            return
+
+        layer_config = self.layers[row]
+        group_col = layer_config.get('group_col')
+        df = layer_config.get('df')
+
+        has_groups = df is not None and group_col and group_col != "无分组" and group_col in df.columns
+        self.group_table.setEnabled(has_groups)
+        
+        if not has_groups:
+            self.group_table.blockSignals(False)
+            return
+
+        groups_in_layer = sorted(df[group_col].dropna().astype(str).unique(), key=str)
+        
+        if 'groups' not in layer_config:
+            layer_config['groups'] = {}
+
+        for i, group_name in enumerate(groups_in_layer):
+            if group_name not in layer_config['groups']:
+                layer_config['groups'][group_name] = {'enabled': True, 'emphasized': False}
+            
+            settings = layer_config['groups'][group_name]
+            self.group_table.insertRow(i)
+            
+            # --- Column 0: 分组名称 (带强调图标) ---
+            name_item = QTableWidgetItem(group_name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            
+            # --- [核心修改] ---
+            # 直接从图层内部的 settings 获取 emphasized 状态
+            is_emphasized = settings.get('emphasized', False)
+            if is_emphasized and self.icon_manager:
+                name_item.setIcon(self.icon_manager.get_icon("favorite"))
+            else:
+                name_item.setIcon(QIcon())
+            # --- 结束修改 ---
+            self.group_table.setItem(i, 0, name_item)
+
+            # --- Column 1: 显示复选框 ---
+            cb = QCheckBox()
+            cb.setChecked(settings.get('enabled', True))
+            cell_widget_cb = QWidget()
+            layout_cb = QHBoxLayout(cell_widget_cb); layout_cb.addWidget(cb); layout_cb.setAlignment(Qt.AlignCenter); layout_cb.setContentsMargins(0,0,0,0)
+            self.group_table.setCellWidget(i, 1, cell_widget_cb)
+            cb.stateChanged.connect(lambda state, n=group_name: self._on_group_toggled(n, 'enabled', state == Qt.Checked))
+
+        self.group_table.blockSignals(False)
+
+    def _on_group_toggled(self, group_name, prop, state):
+        """
+        [新增] 当左侧分组列表中的“显示”复选框被点击时调用。
+        只更新当前选中图层的数据模型。
+        """
+        row = self.current_selected_layer_index
+        if row < 0 or row >= len(self.layers):
+            return
+
+        if prop != 'enabled':
+            return
+
+        layer_config = self.layers[row]
+        if 'groups' in layer_config and group_name in layer_config['groups']:
+            layer_config['groups'][group_name][prop] = state
+            self._update_plot()
 
     def _toggle_layer_visibility(self, row):
         """切换图层的可见性，并高效地只更新受影响的UI元素。"""
@@ -1233,60 +1754,233 @@ class VisualizerDialog(QDialog):
 
     def _update_all_group_settings(self):
         """
-        [NEW] 扫描所有启用图层，收集所有唯一的分组名称，并更新全局分组列表和UI。
-        此方法会同步 `self.global_groups` 字典和右侧面板的 UI。
+        [v3.2 - 选色修复版]
+        扫描所有启用图层，收集所有唯一的分组名称，并更新全局分组
+        数据模型 (self.global_groups) 和右侧的UI面板。
         """
-        all_groups = set() # 存储所有图层中出现过的唯一分组名称
+        all_groups = set()
         for layer in self.layers:
-            # 只考虑启用的图层
             if not layer.get('enabled', True): continue
-            
             group_col = layer.get('group_col')
             df = layer.get('df')
-
             if df is not None and group_col and group_col != "无分组" and group_col in df.columns:
-                # 收集该图层中所有唯一的分组名称 (转换为字符串并去除 NaN)
                 all_groups.update(df[group_col].dropna().astype(str).unique())
         
-        # 清除旧的 UI 控件 (避免重复)
+        old_groups_copy = self.global_groups.copy()
+        self.global_groups.clear()
+        for group_name_str in sorted(list(all_groups), key=str):
+            if group_name_str in old_groups_copy:
+                self.global_groups[group_name_str] = old_groups_copy[group_name_str]
+            else:
+                self.global_groups[group_name_str] = {'enabled': True, 'color': QColor(next(self.color_cycler))}
+        
         while self.group_settings_layout.count():
             child = self.group_settings_layout.takeAt(0)
             if child.widget(): child.widget().deleteLater()
-        
-        # 更新 self.global_groups 模型，保留旧设置（如颜色、启用状态）
-        old_groups_copy = self.global_groups.copy()
-        self.global_groups.clear()
-        
-        # 按字母顺序遍历所有唯一分组名称
-        for group_name_str in sorted(list(all_groups), key=str):
-            if group_name_str in old_groups_copy:
-                # 如果是已知分组，则保留其旧设置
-                self.global_groups[group_name_str] = old_groups_copy[group_name_str]
-            else: # 如果是新发现的分组
-                # 赋予默认启用状态和来自颜色循环器的新颜色
-                self.global_groups[group_name_str] = {'enabled': True, 'color': QColor(next(self.color_cycler))}
-        
+
+        if not self.global_groups:
+            self.grouping_group.setVisible(False)
+            return
+
+        self.grouping_group.setVisible(True)
+
         for group_name_str, settings in self.global_groups.items():
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            
+            row_layout.setContentsMargins(0, 5, 0, 5)
+
             cb = QCheckBox(group_name_str)
             cb.setChecked(settings.get('enabled', True))
-            # ... (设置 Tooltip 的逻辑) ...
+            cb.setToolTip(f"在所有图层中全局显示/隐藏 '{group_name_str}' 分组。")
+            cb.stateChanged.connect(lambda state, n=group_name_str: self._on_global_group_prop_changed(n, 'enabled', state == Qt.Checked))
 
-            # --- [核心修复] ---
-            # 1. 实例化我们新引入的 ColorWidget，而不是 ColorButton
             color_widget = ColorWidget(settings.get('color', QColor(Qt.black)))
+            color_widget.setToolTip(f"为 '{group_name_str}' 分组设置全局颜色。")
+            
+            # --- [核心修复 1] ---
+            # lambda函数必须捕获颜色参数 'c'
+            color_widget.colorChanged.connect(lambda c, n=group_name_str: self._on_global_group_prop_changed(n, 'color', c))
+            # --- 结束修复 ---
             
             row_layout.addWidget(cb, 1)
-            row_layout.addWidget(color_widget) # 将 ColorWidget 添加到布局
+            row_layout.addWidget(color_widget)
             self.group_settings_layout.addWidget(row_widget)
+
+    def _show_group_context_menu_global(self, pos):
+        """
+        [v2.1 - 批量强调版]
+        显示全局分组列表的右键菜单，增加批量强调/取消强调功能。
+        """
+        selected_items = self.group_table.selectedItems()
+        if not selected_items: return
+
+        selected_rows = sorted(list(set(item.row() for item in selected_items)))
+        num_selected = len(selected_rows)
+        selected_group_names = [self.group_table.item(row, 0).text() for row in selected_rows]
+        layer_row = self.current_selected_layer_index
+        if layer_row < 0: return # 必须有一个选中的图层
+        layer_config = self.layers[layer_row]
+
+        menu = QMenu(self)
+        # [核心新增] 播放片段动作
+        # 只有当图层有关联音频时，才添加此动作
+        if 'audio_data' in layer_config:
+            play_action = menu.addAction(self.icon_manager.get_icon("play"), "播放此片段 (Enter)")
+            play_action.triggered.connect(self._play_selected_segment)
+            menu.addSeparator()
+        
+        show_action = menu.addAction(self.icon_manager.get_icon("show"), f"显示选中的 {num_selected} 项")
+        hide_action = menu.addAction(self.icon_manager.get_icon("hidden"), f"隐藏选中的 {num_selected} 项")
+        menu.addSeparator()
+
+        # [核心新增] 批量强调/取消强调
+        emphasize_action = menu.addAction(self.icon_manager.get_icon("favorite"), f"强调选中的 {num_selected} 项")
+        unemphasize_action = menu.addAction(self.icon_manager.get_icon("unfavorite"), f"取消强调选中的 {num_selected} 项")
+        
+        show_action.triggered.connect(lambda: self._apply_to_selected_groups('enabled', True, selected_group_names))
+        hide_action.triggered.connect(lambda: self._apply_to_selected_groups('enabled', False, selected_group_names))
+        emphasize_action.triggered.connect(lambda: self._apply_to_selected_groups('emphasized', True, selected_group_names))
+        unemphasize_action.triggered.connect(lambda: self._apply_to_selected_groups('emphasized', False, selected_group_names))
+        
+        menu.exec_(self.group_table.mapToGlobal(pos))
+
+    def eventFilter(self, source, event):
+        """
+        [新增] 事件过滤器，用于捕获分组列表上的键盘事件。
+        """
+        if source is self.group_table and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._play_selected_segment()
+                return True # 事件已处理
+        
+        return super().eventFilter(source, event)
+
+    def _play_selected_segment(self):
+        """
+        [v11.1 - 变量修复版]
+        使用即时创建的、局部的QMediaPlayer实例，不将其存入任何配置。
+        此版本包含了所有必要的变量定义。
+        """
+        # --- 1. 获取选中的图层和分组 ---
+        layer_row = self.current_selected_layer_index
+        if layer_row < 0 or layer_row >= len(self.layers):
+            return
+
+        group_row = self.group_table.currentRow()
+        if group_row < 0:
+            QMessageBox.warning(self, "未选择", "请在分组列表中选择一个TextGrid区间进行播放。")
+            return
+
+        group_name = self.group_table.item(group_row, 0).text()
+        layer_config = self.layers[layer_row]
+
+        # --- 2. 检查所需数据 ---
+        tg = layer_config.get('tg')
+        audio_data = layer_config.get('audio_data')
+        
+        if not all([tg, audio_data]):
+            QMessageBox.warning(self, "数据不完整", "请确保已为当前图层加载了TextGrid和关联的音频文件。")
+            return
+
+        # --- 3. 在TextGrid中查找区间 ---
+        y, sr = audio_data
+        target_interval = None
+        for tier in tg:
+            if isinstance(tier, textgrid.IntervalTier):
+                for interval in tier:
+                    if interval.mark == group_name:
+                        target_interval = interval
+                        break
+            if target_interval:
+                break
+        
+        if not target_interval:
+            QMessageBox.warning(self, "未找到区间", f"在TextGrid中未找到名为 '{group_name}' 的区间。")
+            return
+
+        # --- 4. 切片音频并写入唯一的临时文件 ---
+        try:
+            import soundfile as sf
+            from PyQt5.QtMultimedia import QMediaContent
+            from PyQt5.QtCore import QUrl
+            import os
+            import time
+
+            start_sample = int(target_interval.minTime * sr)
+            end_sample = int(target_interval.maxTime * sr)
             
-            # 2. 连接 ColorWidget 定义的、正确的 colorChanged(QColor) 信号
-            #    这个信号只发射一个 QColor 参数，所以 lambda c: ... 是正确的
-            cb.stateChanged.connect(lambda state, n=group_name_str: self._on_global_group_prop_changed(n, 'enabled', state == Qt.Checked))
-            color_widget.colorChanged.connect(lambda c, n=group_name_str: self._on_global_group_prop_changed(n, 'color', c))
+            start_sample = max(0, start_sample)
+            end_sample = min(len(y), end_sample)
+
+            if start_sample >= end_sample:
+                return # 空片段，不播放
+
+            segment_data = y[start_sample:end_sample]
+            
+            # [核心修复] 确保 temp_file_path 被正确定义
+            timestamp = int(time.time() * 1000)
+            safe_group_name = "".join(c for c in group_name if c.isalnum())
+            temp_file_path = os.path.join(self.temp_audio_dir, f"segment_{safe_group_name}_{timestamp}.wav")
+            
+            sf.write(temp_file_path, segment_data, sr)
+            
+            # --- 5. 使用全新的QMediaPlayer实例播放 ---
+            old_player = self.layers[layer_row].get('player')
+            if old_player:
+                old_player.stop()
+            
+            player = QMediaPlayer()
+            # 将这个新实例存入一个临时的、不会被 deepcopy 的位置
+            self.layers[layer_row]['player'] = player
+            
+            player.setMedia(QMediaContent(QUrl.fromLocalFile(temp_file_path)))
+            player.play()
+
+        except Exception as e:
+            QMessageBox.critical(self, "播放失败", f"处理或播放音频片段时发生错误:\n{e}")
+
+    def closeEvent(self, event):
+        """
+        重写关闭事件，以清理所有临时目录。
+        """
+        import shutil
+        try:
+            # 清理音频片段临时目录
+            if hasattr(self, 'temp_audio_dir') and self.temp_audio_dir and os.path.exists(self.temp_audio_dir):
+                shutil.rmtree(self.temp_audio_dir)
+            # 清理工程文件临时目录
+            if hasattr(self, 'project_temp_dir') and self.project_temp_dir and os.path.exists(self.project_temp_dir):
+                shutil.rmtree(self.project_temp_dir)
+        except Exception as e:
+            print(f"[Intonation Visualizer Warning] Failed to clean up temp directories: {e}")
+        
+        super().closeEvent(event)
+        
+    def _apply_to_selected_groups(self, prop, value, group_names):
+        """
+        [v3.3 - 图层隔离强调版]
+        将属性变更应用到所有选定的全局分组。
+        - 'emphasized' 属性现在只应用于当前选中的图层。
+        """
+        if prop == 'emphasized':
+            # 强调是图层级操作
+            layer_row = self.current_selected_layer_index
+            if layer_row < 0 or layer_row >= len(self.layers):
+                return
+            layer_config = self.layers[layer_row]
+            
+            for name in group_names:
+                if name in layer_config.get('groups', {}):
+                    layer_config['groups'][name]['emphasized'] = value
+            self._update_group_table() # 更新左侧列表的图标
+        else:
+            # 颜色和启用是全局操作
+            for name in group_names:
+                if name in self.global_groups:
+                    self.global_groups[name][prop] = value
+            self._update_all_group_settings() # 更新右侧全局UI
+        
+        self._update_plot()
 
     def _on_global_group_prop_changed(self, group_name, prop, value):
         """处理全局分组属性（启用状态或颜色）的变化。"""
@@ -1354,159 +2048,156 @@ class VisualizerDialog(QDialog):
     # ==========================================================================
     def _update_plot(self):
         """
-        [v2.2 - 图例修复最终版] 核心绘图逻辑。
-        此版本通过动态收集绘图句柄，彻底解决了“仅显示平均值”时图例消失的问题，
-        并能正确处理从列分组，使用全局分组颜色，以及将图例放置在图表外部。
+        [v3.4 - 图层隔离强调 & 离群点处理版] 核心绘图逻辑。
+        - “强调”状态从每个图层独立的配置中读取。
+        - 在绘图前，会先过滤掉被标记为 `_is_ignored` 的数据点。
+        - 同时考虑全局和图层内部的分组可见性。
         """
         try:
-            # --- 1. 准备绘图环境 ---
             self.figure.clear()
             ax = self.figure.add_subplot(111)
             self.plotted_lines.clear()
             self.hover_annotation = None
             has_any_visible_data = False
             grouped_data_for_mean_contour = {}
-
-            # [核心修复] 创建一个临时的列表来动态收集所有需要显示在图例中的绘图句柄和标签
             legend_handles, legend_labels = [], []
 
-            # --- 2. 全局Z-Score统计 (如果需要) ---
             global_mean, global_std = None, None
             if self.norm_combo.currentText() == "Z-Score" and self.z_scope_combo.currentText() == "按整个数据集":
-                # 收集所有启用图层的F0数据来计算全局均值和标准差
                 all_f0_data = []
                 for layer_config in self.layers:
                     if not layer_config.get('enabled', True): continue
-                    df = layer_config.get('df')
+                    
+                    df_to_process = layer_config.get('df')
+                    if df_to_process is not None and '_is_ignored' in df_to_process.columns:
+                        df_to_process = df_to_process[df_to_process['_is_ignored'] == False]
+
                     f0_col = layer_config.get('f0_col')
-                    if df is not None and f0_col and f0_col in df.columns:
-                        all_f0_data.append(df[f0_col].dropna())
+                    if df_to_process is not None and f0_col and f0_col in df_to_process.columns:
+                        all_f0_data.append(df_to_process[f0_col].dropna())
                 
                 if all_f0_data:
                     all_f0 = pd.concat(all_f0_data)
                     global_mean, global_std = all_f0.mean(), all_f0.std()
                     if global_std == 0 or np.isnan(global_std): global_std = 1
 
-            # --- 3. 遍历所有图层进行数据处理和绘图 ---
             for layer_config in self.layers:
-                if not layer_config.get('enabled', True): continue # 跳过被禁用的图层
+                if not layer_config.get('enabled', True): continue
                 
                 df_original = layer_config.get('df')
+                
+                if df_original is not None and '_is_ignored' in df_original.columns:
+                    df = df_original[df_original['_is_ignored'] == False].copy()
+                else:
+                    df = df_original
+                
                 time_col, f0_col, group_col = layer_config.get('time_col'), layer_config.get('f0_col'), layer_config.get('group_col')
 
-                if df_original is None or not all(c in df_original.columns for c in [time_col, f0_col]):
+                if df is None or not all(c in df.columns for c in [time_col, f0_col]):
                     continue
                 
-                # 判断分组依据是否有效且在DataFrame中
-                if group_col != "无分组" and group_col in df_original.columns:
-                    plot_df_base = df_original.dropna(subset=[time_col, f0_col, group_col]).copy()
+                if group_col != "无分组" and group_col in df.columns:
+                    plot_df_base = df.dropna(subset=[time_col, f0_col, group_col]).copy()
                     
-                    # 遍历全局分组列表，按每个分组绘制曲线
                     for global_group_name_str, global_group_settings in self.global_groups.items():
-                        # 只有当全局分组是启用的，并且该图层中有这个分组的数据时才绘制
-                        if not global_group_settings.get('enabled', True): continue
+                        is_globally_enabled = global_group_settings.get('enabled', True)
+                        
+                        layer_groups = layer_config.get('groups', {})
+                        layer_group_settings = layer_groups.get(global_group_name_str, {})
+                        is_layer_enabled = layer_group_settings.get('enabled', True)
+
+                        if not (is_globally_enabled and is_layer_enabled):
+                            continue
                         
                         current_group_df = plot_df_base[plot_df_base[group_col].astype(str) == global_group_name_str].copy()
                         if current_group_df.empty: continue
 
-                        # 处理数据 (归一化、平滑等)
                         df_processed = self._process_single_dataframe(current_group_df, time_col, f0_col, layer_config, global_mean, global_std)
                         if df_processed is None or df_processed.empty: continue
 
                         t_data, f0_data = df_processed[time_col], df_processed[f0_col]
-                        color_hex = global_group_settings['color'].name() # 使用全局分组的颜色
-
-                        # [核心修复] 只有当“仅显示平均值”未被勾选时，才绘制原始曲线和数据点
+                        color_hex = global_group_settings['color'].name()
+                        
+                        is_emphasized = layer_group_settings.get('emphasized', False)
+                        
                         if not self.show_average_only_check.isChecked():
-                            # 绘制线条，不再需要 label 参数
-                            line, = ax.plot(t_data, f0_data, color=color_hex, zorder=10, picker=5)
+                            plot_kwargs = { 'color': color_hex, 'picker': 5, 'linewidth': 1.5, 'alpha': 0.8, 'zorder': 10 }
+                            # --- [核心修改] ---
+                            scatter_kwargs = {
+                                'color': color_hex,
+                                's': layer_config.get('point_size', 10),
+                                'alpha': layer_config.get('point_alpha', 0.4),
+                                'zorder': 5,
+                                'edgecolors': 'black', # 添加白色轮廓
+                                'linewidths': 0.5      # 设置轮廓线宽
+                            }
+                            # --- 结束修改 ---
+                            scatter_kwargs = { 'color': color_hex, 's': layer_config.get('point_size', 10), 'alpha': layer_config.get('point_alpha', 0.4), 'zorder': 5 }
+                            if is_emphasized:
+                                plot_kwargs['linewidth'] = 4.0; plot_kwargs['alpha'] = 1.0; plot_kwargs['zorder'] = 20
+                                scatter_kwargs['alpha'] = min(1.0, layer_config.get('point_alpha', 0.4) * 2)
+
+                            line, = ax.plot(t_data, f0_data, **plot_kwargs)
                             
-                            # 为悬浮提示和可能的其他交互保存数据
                             label = f"{layer_config['name']} - {global_group_name_str}"
                             self.plotted_lines.append({'line': line, 'label': label, 'data': df_processed[[time_col, f0_col]]})
                             has_any_visible_data = True
                             
-                            # 绘制数据点
                             if layer_config.get('show_points', False): 
-                                ax.scatter(t_data, f0_data, color=color_hex, s=layer_config.get('point_size', 10), alpha=layer_config.get('point_alpha', 0.4), zorder=5)
+                                # --- [核心修改] ---
+                                scatter_kwargs = {
+                                    'color': color_hex,
+                                    's': layer_config.get('point_size', 10),
+                                    'alpha': layer_config.get('point_alpha', 0.4),
+                                    'zorder': 5,
+                                    'edgecolors': 'black', # 添加白色轮廓
+                                    'linewidths': 0.5      # 设置轮廓线宽
+                                }
+                                ax.scatter(t_data, f0_data, **scatter_kwargs)
+                                # --- 结束修改 ---
                         
-                        # 无论是否显示原始曲线，都需要为计算平均轮廓准备数据
                         if global_group_name_str not in grouped_data_for_mean_contour: 
                             grouped_data_for_mean_contour[global_group_name_str] = {'curves': [], 'color': global_group_settings['color']}
                         grouped_data_for_mean_contour[global_group_name_str]['curves'].append(df_processed)
                 
-                else: # 如果没有有效的分组列，则作为无分组图层整体绘制
-                    df_processed = self._process_single_dataframe(df_original.copy(), time_col, f0_col, layer_config, global_mean, global_std)
+                else:
+                    df_processed = self._process_single_dataframe(df.copy() if df is not None else pd.DataFrame(), time_col, f0_col, layer_config, global_mean, global_std)
                     if df_processed is None or df_processed.empty: continue
-
-                    if not self.show_average_only_check.isChecked(): # 无分组数据不计算平均值，所以直接判断
+                    if not self.show_average_only_check.isChecked():
                         t_data, f0_data = df_processed[time_col], df_processed[f0_col]
                         label = layer_config['name']
                         color_hex = QColor(Qt.darkGray).name()
-                        
-                        line, = ax.plot(t_data, f0_data, color=color_hex, zorder=10, picker=5)
+                        line, = ax.plot(t_data, f0_data, color=color_hex, zorder=10, picker=5, linewidth=1.5, alpha=0.8)
                         self.plotted_lines.append({'line': line, 'label': label, 'data': df_processed[[time_col, f0_col]]})
                         has_any_visible_data = True
                         if layer_config.get('show_points', False): 
                             ax.scatter(t_data, f0_data, color=color_hex, s=layer_config.get('point_size', 10), alpha=layer_config.get('point_alpha', 0.4), zorder=5)
 
-            # --- 4. 绘制平均轮廓线（如果需要）---
-            # 这个函数现在也会向 legend_handles 和 legend_labels 添加内容
             if self.show_mean_contour_check.isChecked() and self.normalize_time_check.isChecked():
                 self._plot_mean_contours(ax, grouped_data_for_mean_contour, legend_handles, legend_labels)
-                has_any_visible_data = True # 如果画了平均线，就认为有可见数据
-
-            # --- 5. 设置悬浮提示 ---
+                has_any_visible_data = True
             if has_any_visible_data:
-                self.hover_annotation = ax.text(0.98, 0.98, '', transform=ax.transAxes,
-                                                ha='right', va='top', fontsize=9,
-                                                bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.9),
-                                                zorder=100)
+                self.hover_annotation = ax.text(0.98, 0.98, '', transform=ax.transAxes, ha='right', va='top', fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.9), zorder=100)
                 self.hover_annotation.set_visible(False)
-
-            # --- 6. 设置图表样式 ---
-            ax.set_title(self.title_edit.text(), fontsize=14)
-            ax.set_xlabel(self.xlabel_edit.text())
-            ax.set_ylabel(self.ylabel_edit.text())
-            ax.grid(True, linestyle='--', alpha=0.6)
-            ax.autoscale_view()
-            
-            # --- 7. 最终的图例生成 ---
+            ax.set_title(self.title_edit.text(), fontsize=14); ax.set_xlabel(self.xlabel_edit.text()); ax.set_ylabel(self.ylabel_edit.text()); ax.grid(True, linestyle='--', alpha=0.6); ax.autoscale_view()
             if self.show_legend_check.isChecked():
-                
-                # [核心修复] 如果用户选择“仅显示平均值”，则图例只包含平均线
-                # 否则，我们需要手动为原始曲线创建图例（因为我们没有在ax.plot中设置label）
                 if not self.show_average_only_check.isChecked():
-                    # 清空并重新生成图例句柄
-                    legend_handles.clear()
-                    legend_labels.clear()
-                    
-                    # 从 `self.global_groups` 中收集所有启用的分组信息
+                    legend_handles.clear(); legend_labels.clear()
                     for group_name, settings in sorted(self.global_groups.items()):
                         if settings.get('enabled', True):
                             color = settings.get('color', QColor(Qt.black))
-                            line = Line2D([0], [0], color=color.name(), lw=2) # 实线样本
+                            line = Line2D([0], [0], color=color.name(), lw=2)
                             legend_handles.append(line)
                             legend_labels.append(group_name)
-
-                # 如果有任何有效的图例条目，则绘制图例
                 if legend_handles:
-                    ax.legend(handles=legend_handles, 
-                              labels=legend_labels,
-                              loc='center left', 
-                              bbox_to_anchor=(1.02, 0.5),
-                              fontsize='small',
-                              labelspacing=1.2)
-
-            # --- 8. 调整布局并重绘画布 ---
-            # 调整布局以确保图例不会被裁切 (为右侧的图例留出15%的空间)
-            self.figure.tight_layout(rect=[0, 0, 1, 1]) 
-            self.canvas.draw()
+                    ax.legend(handles=legend_handles, labels=legend_labels, loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize='small', labelspacing=1.2)
+            self.figure.tight_layout(rect=[0, 0, 1, 1]); self.canvas.draw()
             
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             QMessageBox.critical(self, "绘图失败", f"生成图表时发生错误: {e}\n\n请检查数据列和图层配置。")
-            self.figure.clear()
-            self.canvas.draw()
+            self.figure.clear(); self.canvas.draw()
 
     def _process_single_dataframe(self, df, time_col, f0_col, layer_config, global_zscore_mean=None, global_zscore_std=None):
         """
@@ -1607,30 +2298,77 @@ class VisualizerDialog(QDialog):
             self.show_mean_contour_check.setChecked(False) # 不满足条件时强制取消勾选
 
     def _show_context_menu(self, pos):
-        """显示画布的右键上下文菜单。"""
+        """
+        [v3.4 - 离群点处理版]
+        显示画布的右键上下文菜单。
+        - 增加了“框选忽略点”和“恢复所有忽略的点”功能。
+        """
         menu = QMenu(self)
+        # [核心新增] 工程文件操作
+        open_proj_action = menu.addAction(self.icon_manager.get_icon("open_folder"), "打开工程 (.pavp)...")
+        save_proj_action = menu.addAction(self.icon_manager.get_icon("save_as"), "保存工程 (.pavp)...")
+        menu.addSeparator()
         
-        # 刷新图表和重置视图
         refresh_action = menu.addAction(self.icon_manager.get_icon("refresh"), "刷新图表")
         reset_view_action = menu.addAction(self.icon_manager.get_icon("zoom_selection"), "重置视图/缩放")
         menu.addSeparator()
+
+        # --- [核心修改] 新增离群点处理功能 ---
+        is_layer_selected = self.current_selected_layer_index != -1
+        ignore_action = menu.addAction(self.icon_manager.get_icon("select_object"), "框选忽略点 (当前图层)...")
+        restore_action = menu.addAction(self.icon_manager.get_icon("undo"), "恢复所有忽略的点 (当前图层)")
+        ignore_action.setEnabled(is_layer_selected)
+        restore_action.setEnabled(is_layer_selected)
+        menu.addSeparator()
+        # --- 结束修改 ---
         
-        # 复制和保存图片
         copy_action = menu.addAction(self.icon_manager.get_icon("copy"), "复制图片到剪贴板")
         save_action = menu.addAction(self.icon_manager.get_icon("save"), "保存图片...")
         menu.addSeparator()
         
-        # 清空所有图层
         clear_action = menu.addAction(self.icon_manager.get_icon("clear_contents"), "清空所有图层...")
         
-        # 连接动作
-        refresh_action.triggered.connect(self._update_plot)
-        reset_view_action.triggered.connect(self._reset_view)
-        copy_action.triggered.connect(self._copy_plot_to_clipboard)
-        save_action.triggered.connect(self._save_plot_image)
-        clear_action.triggered.connect(self._clear_all_data)
-            
-        menu.exec_(self.canvas.mapToGlobal(pos))
+        action = menu.exec_(self.canvas.mapToGlobal(pos))
+
+        if action == open_proj_action: self._handle_open_project()
+        elif action == save_proj_action: self._handle_save_project()
+        elif action == refresh_action: self._update_plot()
+        elif action == reset_view_action: self._reset_view()
+        elif action == ignore_action: self._start_ignore_selection()
+        elif action == restore_action: self._restore_ignored_points()
+        elif action == copy_action: self._copy_plot_to_clipboard()
+        elif action == save_action: self._save_plot_image()
+        elif action == clear_action: self._clear_all_data()
+
+    # [新增] handle 方法
+    def _handle_open_project(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "打开工程文件", "", "PhonAcq 工程文件 (*.pavp)")
+        if not filepath: return
+        try:
+            data, temp_dir = self._open_project_from_file(filepath)
+            if data and temp_dir:
+                self._restore_state_from_pavp(data, temp_dir)
+                if hasattr(self.parent(), 'statusBar'):
+                    self.parent().statusBar().showMessage(f"工程 '{os.path.basename(filepath)}' 已加载。", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "打开工程失败", f"无法加载工程文件:\n{e}")
+            if hasattr(self, 'project_temp_dir') and self.project_temp_dir:
+                shutil.rmtree(self.project_temp_dir, ignore_errors=True)
+                self.project_temp_dir = None
+
+    # [新增] handle 方法
+    def _handle_save_project(self):
+        if not self.layers:
+            QMessageBox.warning(self, "无内容", "没有可保存的图层。")
+            return
+        filepath, _ = QFileDialog.getSaveFileName(self, "保存工程文件", "未命名语调工程.pavp", "PhonAcq 工程文件 (*.pavp)")
+        if not filepath: return
+        try:
+            self._save_project_to_file(self.plugin_id, filepath)
+            if hasattr(self.parent(), 'statusBar'):
+                self.parent().statusBar().showMessage(f"工程已保存到 '{os.path.basename(filepath)}'。", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "保存工程失败", f"无法保存工程文件:\n{e}")
  
     def _load_data_from_file_dialog(self):
         """通过文件对话框加载数据（CSV/Excel/TextGrid），并添加到图层。"""
@@ -1681,35 +2419,113 @@ class VisualizerDialog(QDialog):
         self._update_ui_state() # 更新UI状态
 
     def _save_plot_image(self):
-        """保存图表为图片文件。"""
+        """
+        [v2.1 - 标准化路径版]
+        保存图表为图片文件。
+        - 默认保存路径现在是 `Results/analyze/charts/intonation/`。
+        """
         title = self.title_edit.text()
-        safe_filename = re.sub(r'[\\/*?:"<>|]', "_", title) # 替换文件名中的非法字符
+        safe_filename = re.sub(r'[\\/*?:"<>|]', "_", title)
         
+        # --- [核心修改] 获取标准的图表保存目录 ---
+        charts_dir, _ = self._get_or_create_analysis_dirs()
+        
+        default_dir = charts_dir if charts_dir else None
+        default_path = os.path.join(default_dir, f"{safe_filename}.png") if default_dir else f"{safe_filename}.png"
+
         file_path, _ = QFileDialog.getSaveFileName(
             self, 
             "保存图片", 
-            f"{safe_filename}.png",
+            default_path, # 使用新的默认路径
             "PNG图片 (*.png);;高分辨率PDF (*.pdf);;JPEG图片 (*.jpg);;SVG矢量图 (*.svg)"
         )
  
         if file_path:
             try: 
-                # facecolor='white' 确保保存的图片背景是白色，而不是透明（默认）
                 self.figure.savefig(file_path, dpi=300, bbox_inches='tight', facecolor='white')
                 QMessageBox.information(self, "成功", f"图表已保存到:\n{file_path}")
             except Exception as e: 
                 QMessageBox.critical(self, "保存失败", f"无法保存图片: {e}")
 
+    def _auto_match_textgrid_for_layer(self, layer_config, predefined_tg_path=None):
+        """
+        [v11.2 - 预设路径增强版]
+        为一个图层自动查找、加载并应用TextGrid。
+        - 新增 predefined_tg_path 参数，如果提供，则优先加载此文件。
+        """
+        import re
+        import textgrid
+        import pandas as pd
+
+        found_tg_path = None
+        # 1. 如果有预设路径且该文件存在，则优先使用它
+        if predefined_tg_path and os.path.exists(predefined_tg_path):
+            found_tg_path = predefined_tg_path
+        else:
+            # 2. 否则，执行扫描逻辑
+            _, textgrids_dir = self._get_or_create_analysis_dirs()
+            if not textgrids_dir: return
+
+            layer_name = layer_config.get('name')
+            if not layer_name: return
+            
+            core_layer_name = re.sub(r'(_analysis.*|_slice.*)', '', layer_name, flags=re.IGNORECASE)
+
+            for filename in os.listdir(textgrids_dir):
+                if filename.lower().endswith('.textgrid'):
+                    tg_base_name = os.path.splitext(filename)[0]
+                    if tg_base_name.lower() == core_layer_name.lower():
+                        found_tg_path = os.path.join(textgrids_dir, filename)
+                        break
+
+        # 3. 如果找到了 TextGrid 文件，则加载并应用
+        if found_tg_path:
+            print(f"[Intonation Visualizer] Loading TextGrid for layer '{layer_config['name']}' from '{os.path.basename(found_tg_path)}'")
+            try:
+                tg_object = textgrid.TextGrid.fromFile(found_tg_path)
+                df = layer_config.get('df')
+
+                if df is not None and 'timestamp' in df.columns:
+                    if 'textgrid_label' in df.columns:
+                        df.drop(columns=['textgrid_label'], inplace=True)
+
+                    label_col = pd.Series(np.nan, index=df.index, dtype=object)
+                    for tier in tg_object:
+                        if isinstance(tier, textgrid.IntervalTier):
+                            for interval in tier:
+                                if interval.mark:
+                                    mask = (df['timestamp'] >= interval.minTime) & (df['timestamp'] < interval.maxTime)
+                                    label_col.loc[mask] = interval.mark
+                    df['textgrid_label'] = label_col
+
+                    layer_config['tg'] = tg_object
+                    layer_config['tg_filename'] = os.path.basename(found_tg_path)
+                    layer_config['original_tg_path'] = found_tg_path 
+                    layer_config['group_col'] = 'textgrid_label'
+                else:
+                    print(f"[Intonation Visualizer WARNING] Layer '{layer_config['name']}' has a matching TextGrid, but its DataFrame is missing a 'timestamp' column.")
+
+            except Exception as e:
+                print(f"[Intonation Visualizer ERROR] Failed to load or apply TextGrid '{found_tg_path}': {e}")
+
     # ==========================================================================
     # Matplotlib 交互相关方法
     # ==========================================================================
     def _on_mouse_press(self, event):
-        """处理鼠标按下事件，用于开始平移。"""
-        # 仅当鼠标在坐标轴内且使用左键时触发 (button=1)
+        """
+        [v3.4 - 离群点处理版]
+        处理鼠标按下事件，用于开始平移。
+        - 如果框选器激活，则不执行平移。
+        """
+        # --- [核心修改] ---
+        if self.rect_selector is not None and self.rect_selector.active:
+            return
+        # --- 结束修改 ---
+
         if event.inaxes and event.button == 1:
             self._is_panning = True
-            self._pan_start_pos = (event.xdata, event.ydata) # 记录鼠标在数据坐标系中的起始位置
-            self.canvas.setCursor(Qt.ClosedHandCursor) # 改变鼠标光标为抓手
+            self._pan_start_pos = (event.xdata, event.ydata)
+            self.canvas.setCursor(Qt.ClosedHandCursor)
 
     def _on_mouse_release(self, event):
         """处理鼠标释放事件，结束平移。"""
@@ -1778,6 +2594,144 @@ class VisualizerDialog(QDialog):
         if not found_line and self.hover_annotation.get_visible():
             self.hover_annotation.set_visible(False)
             self.canvas.draw_idle()
+    def _start_ignore_selection(self):
+        """
+        [v3.5 - 自动显示数据点版]
+        激活矩形选择器以忽略数据点。
+        - 进入此模式时，会自动勾选并应用“显示数据点”选项。
+        """
+        if self.current_selected_layer_index < 0:
+            QMessageBox.warning(self, "无操作对象", "请先在左侧列表中选择一个图层。")
+            return
+        
+        # --- [核心修改] ---
+        # 1. 自动勾选“显示数据点”并更新图层配置
+        self.show_points_check.setChecked(True)
+        # 2. 手动调用一次槽函数，以确保配置更新和图表重绘
+        self._on_current_layer_setting_changed()
+        # 3. 强制处理UI事件，确保图表重绘完成，点都显示出来
+        QApplication.processEvents()
+        # --- 结束修改 ---
+        
+        ax = self.figure.gca()
+
+        if self.show_ignore_mode_info:
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("进入框选忽略模式")
+            msg_box.setTextFormat(Qt.RichText)
+            msg_box.setText(
+                "已进入框选忽略模式。<br><br>"
+                "■ 如果左侧<b>未选择</b>任何分组，将忽略框内所有点。<br>"
+                "■ 如果左侧<b>已选择</b>一个或多个分组，将只忽略框内属于这些分组的点。<br><br>"
+                "请拖动鼠标进行选择，按 'Esc' 键可取消。"
+            )
+            checkbox = QCheckBox("本次会话不再提示")
+            msg_box.setCheckBox(checkbox)
+            msg_box.exec()
+            if checkbox.isChecked():
+                self.show_ignore_mode_info = False
+
+        if self.rect_selector:
+            self.rect_selector.set_active(False)
+
+        rect_props = dict(facecolor='red', edgecolor='red', alpha=0.2, fill=True)
+        self.rect_selector = matplotlib.widgets.RectangleSelector(
+            ax, self._on_ignore_selection, useblit=False, button=[1],
+            minspanx=5, minspany=5, spancoords='pixels', interactive=True, props=rect_props
+        )
+        self.canvas.setCursor(Qt.CrossCursor)
+
+    def _on_ignore_selection(self, eclick, erelease):
+        """
+        [v3.5 - 自动关闭数据点版]
+        当用户完成一次矩形选择后的回调函数。
+        - 无论操作是否成功，都会自动取消勾选“显示数据点”。
+        """
+        x1, y1 = eclick.xdata, eclick.ydata
+        x2, y2 = erelease.xdata, erelease.ydata
+
+        if self.rect_selector:
+            self.rect_selector.set_active(False)
+        self.canvas.setCursor(Qt.ArrowCursor)
+
+        layer_index = self.current_selected_layer_index
+        
+        # --- [核心修改] ---
+        # 使用 finally 块确保无论发生什么，都会执行清理操作
+        try:
+            if layer_index < 0:
+                self.canvas.draw()
+                return
+                
+            layer_config = self.layers[layer_index]
+            df = layer_config.get('df')
+            if df is None:
+                self.canvas.draw()
+                return
+
+            if '_is_ignored' not in df.columns:
+                df['_is_ignored'] = False
+
+            time_col = layer_config.get('time_col')
+            f0_col = layer_config.get('f0_col')
+            group_col = layer_config.get('group_col')
+            if not time_col or not f0_col:
+                self.canvas.draw()
+                return
+
+            selected_items = self.group_table.selectedItems()
+            selected_group_names = {item.text() for item in selected_items if item.column() == 0}
+
+            min_x, max_x = min(x1, x2), max(x1, x2)
+            min_y, max_y = min(y1, y2), max(y1, y2)
+            
+            spatial_mask = (
+                (df[time_col] >= min_x) & (df[time_col] <= max_x) &
+                (df[f0_col] >= min_y) & (df[f0_col] <= max_y)
+            )
+
+            final_mask = None
+            if selected_group_names and group_col and group_col != "无分组" and group_col in df.columns:
+                group_mask = df[group_col].astype(str).isin(selected_group_names)
+                final_mask = spatial_mask & group_mask
+            else:
+                final_mask = spatial_mask
+            
+            num_ignored = final_mask.sum()
+            if num_ignored > 0:
+                df.loc[final_mask, '_is_ignored'] = True
+                self._update_plot() # 在关闭数据点之前重绘一次，显示忽略结果
+                QMessageBox.information(self, "操作完成", f"已成功忽略 {num_ignored} 个数据点。")
+            else:
+                self.canvas.draw()
+        finally:
+            # 无论是否成功忽略，都自动取消勾选“显示数据点”
+            self.show_points_check.setChecked(False)
+            self._on_current_layer_setting_changed() # 应用更改并最终重绘
+        # --- 结束修改 ---
+
+    def _restore_ignored_points(self):
+        """恢复当前图层中所有被忽略的点。"""
+        layer_index = self.current_selected_layer_index
+        if layer_index < 0:
+            QMessageBox.warning(self, "无操作对象", "请先在左侧列表中选择一个图层。")
+            return
+            
+        layer_config = self.layers[layer_index]
+        df = layer_config.get('df')
+
+        if df is not None and '_is_ignored' in df.columns:
+            num_restored = df['_is_ignored'].sum()
+            if num_restored > 0:
+                df['_is_ignored'] = False
+                print(f"[Intonation Visualizer] Restored {num_restored} points in layer '{layer_config['name']}'.")
+                self._update_plot()
+                QMessageBox.information(self, "操作完成", f"已恢复 {num_restored} 个被忽略的点。")
+            else:
+                QMessageBox.information(self, "无需操作", "当前图层没有被忽略的点。")
+        else:
+            QMessageBox.information(self, "无需操作", "当前图层没有被忽略的点。")
 
     # ==========================================================================
     # 拖拽事件处理
@@ -1892,60 +2846,68 @@ class VisualizerDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"无法读取文件 '{os.path.basename(file_path)}':\n{e}")
 
-    def add_data_source(self, df, source_name="从外部加载"):
+    def add_data_source(self, df, source_name="从外部加载", audio_filepath=None):
         """
-        [MODIFIED] 从外部（如音频分析模块）加载 DataFrame，并将其作为新的图层添加到可视化器中。
-        此版本根据传入的 df 结构自动选择合适的列，并为图层设置默认样式。
-        :param df: 要加载的 Pandas DataFrame。
-        :param source_name: 数据的来源名称，用于生成默认图层名和文件名显示。
+        [v11.2 - 文件名处理最终修复版]
+        从外部加载 DataFrame。此版本修复了对 source_name 的重复处理导致的
+        长文件名和带点号文件名匹配TextGrid失败的问题。
         """
         if df is None or df.empty:
             QMessageBox.warning(self, "数据无效", "传入的 DataFrame 为空或无效。")
             return
-        
-        # 检查是否包含必要的数值列 (时间, F0)
+
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         if len(numeric_cols) < 2:
             QMessageBox.warning(self, "数据格式错误", "传入的DataFrame至少需要两列数值型数据（时间和F0）。")
             return
 
-        # 自动生成图层名称，确保唯一性
-        base_name = os.path.splitext(source_name)[0] if source_name else "新数据"
+        # --- [核心修复] ---
+        # 移除多余的 os.path.splitext 调用。
+        # source_name 从 audio_analysis 模块传来时已经是处理好的基础名。
+        base_name = source_name if source_name else "新数据"
+        # --- 结束修复 ---
+        
         layer_name = base_name; counter = 1
         while any(layer['name'] == layer_name for layer in self.layers):
             layer_name = f"{base_name} ({counter})"; counter += 1
         
-        # 创建一个新的图层配置，并尝试自动填充列名和默认样式
         new_layer_config = {
             "name": layer_name,
             "df": df,
-            "tg": None, # 外部传入的 DataFrame 通常不带 TextGrid
             "data_filename": f"{source_name} (实时数据)",
-            "tg_filename": "未选择 (可选)",
-            "enabled": True, # 默认启用
-            "time_col": "", # 待自动检测或用户选择
-            "f0_col": "", # 待自动检测或用户选择
-            "group_col": "无分组", # 初始无分组
-            # 默认样式设置
-            "smoothing_enabled": True, # 默认启用平滑
-            "smoothing_window": 4,     # 默认4，对应9点窗口
-            "show_points": False,      # 默认不显示点
-            "point_size": 10,
-            "point_alpha": 0.4
+            "enabled": True,
+            "tg": None, "tg_filename": "未选择 (可选)",
+            "audio_path": None, "audio_data": None,
+            "smoothing_enabled": True, "smoothing_window": 4,
+            "show_points": False, "point_size": 10, "point_alpha": 0.4
         }
 
-        # 尝试自动选择时间/F0列
+        if audio_filepath and os.path.exists(audio_filepath):
+            try:
+                import librosa
+                print(f"[Intonation Visualizer] Auto-loading audio for layer '{layer_name}' from: {audio_filepath}")
+                y, sr = librosa.load(audio_filepath, sr=None, mono=True)
+                
+                new_layer_config['audio_path'] = audio_filepath
+                new_layer_config['audio_data'] = (y, sr)
+                print(f"[Intonation Visualizer] Audio loaded successfully. Shape: {y.shape}, SR: {sr}")
+
+            except Exception as e:
+                print(f"[Intonation Visualizer ERROR] Failed to auto-load audio for layer '{layer_name}': {e}")
+        
+        self._auto_match_textgrid_for_layer(new_layer_config)
+
+        if new_layer_config.get('group_col') != 'textgrid_label':
+            all_cols = df.columns.tolist()
+            new_layer_config['group_col'] = next((c for c in all_cols if 'group' in c.lower() or 'label' in c.lower() or 'category' in c.lower()), "无分组")
+
         new_layer_config['time_col'] = next((c for c in numeric_cols if 'time' in c.lower() or 'timestamp' in c.lower()), numeric_cols[0])
         new_layer_config['f0_col'] = next((c for c in numeric_cols if 'f0' in c.lower() or 'hz' in c.lower()), numeric_cols[1] if len(numeric_cols) > 1 else numeric_cols[0])
 
-        # 尝试选择包含“group”或“label”的列作为默认分组
-        all_cols = df.columns.tolist()
-        new_layer_config['group_col'] = next((c for c in all_cols if 'group' in c.lower() or 'label' in c.lower() or 'category' in c.lower()), "无分组")
-
         self.layers.append(new_layer_config)
-        self._update_layer_table() # 更新图层列表UI
-        self._update_all_group_settings() # [NEW] 更新全局分组
-        self._update_plot() # 重新绘图
+        self._update_layer_table()
+        self._update_all_group_settings()
+        self._update_plot()
 
 # ==============================================================================
 # 插件主入口类
@@ -1988,25 +2950,28 @@ class IntonationVisualizerPlugin(BasePlugin):
 
     def execute(self, **kwargs):
         """
-        插件的统一入口。此版本修复了 source_name 未被正确处理的问题。
+        [v2.2 - 音频路径感知版]
+        插件的统一入口。现在可以接收并处理传入的 audio_filepath。
         """
-        # 如果窗口不存在，则创建
         if self.visualizer_dialog is None:
             parent = self.main_window if hasattr(self, 'main_window') else None
             icon_manager = getattr(parent, 'icon_manager', None) if parent else None
             self.visualizer_dialog = VisualizerDialog(parent=parent, icon_manager=icon_manager)
             self.visualizer_dialog.finished.connect(self._on_dialog_finished)
 
-        # 1. 从 kwargs 中提取 dataframe 和 source_name
         dataframe_to_load = kwargs.get('dataframe')
-        source_name = kwargs.get('source_name') # 如果不存在，会是 None
+        source_name = kwargs.get('source_name')
+        # [核心新增] 从 kwargs 中安全地获取 audio_filepath
+        audio_filepath = kwargs.get('audio_filepath')
 
-        # 2. 检查是否有DataFrame参数传入
         if dataframe_to_load is not None:
-            # 3. 将 dataframe 和 source_name 一起传递给对话框
-            self.visualizer_dialog.add_data_source(dataframe_to_load, source_name)
+            # [核心新增] 将 audio_filepath 传递给 add_data_source 方法
+            self.visualizer_dialog.add_data_source(
+                dataframe_to_load, 
+                source_name, 
+                audio_filepath=audio_filepath
+            )
 
-        # 显示窗口
         self.visualizer_dialog.show()
         self.visualizer_dialog.raise_()
         self.visualizer_dialog.activateWindow()

@@ -154,16 +154,22 @@ class BatchDownloaderWorker(QObject):
 # 2. UI 对话框
 # ==============================================================================
 class NexusDialog(QDialog):
-    def __init__(self, main_window, icon_manager, plugins_dir):
-        super().__init__(main_window)
-        self.main_window = main_window
+    def __init__(self, parent_widget, true_main_window_ref, icon_manager, plugins_dir):
+        # 使用 parent_widget 作为标准的Qt父级，确保对话框层级正确
+        super().__init__(parent_widget)
+        
+        # 保存对直接父窗口 (可能是 MainWindow 或 PluginManagementDialog) 的引用
+        self.main_window = parent_widget
+        # [核心修复] 保存一个永远指向真正 MainWindow 实例的引用
+        self.true_main_window = true_main_window_ref
+        
         self.icon_manager = icon_manager
         self.plugins_dir = plugins_dir
-        self.online_plugins = []        # 从在线索引获取的所有插件信息
-        self.installed_plugin_ids = set() # 本地已安装插件的ID集合
-        self.worker = None              # 后台工作器实例
-        self.thread = None              # 后台线程实例
-        self.progress_dialog = None     # 进度对话框实例
+        self.online_plugins = []
+        self.installed_plugin_ids = set()
+        self.worker = None
+        self.thread = None
+        self.progress_dialog = None
         
         self.setWindowTitle("插件市场 (Nexus)")
         self.resize(900, 600)
@@ -374,19 +380,25 @@ class NexusDialog(QDialog):
             self.version_combo.clear()
             release_url = plugin_info.get('release_url')
             if release_url:
-                match = re.search(r'plugins-release-(\d+\.\d+)', release_url)
+                match = re.search(r'plugins-release-(\d+)\.(\d+)', release_url) # [修改] 使用两个捕获组
                 if match:
-                    latest_major_minor = match.group(1) # 例如 "4.6"
-                    major, minor = map(int, latest_major_minor.split('.'))
-                    # 从最新版本向下生成版本号列表 (例如 4.6, 4.5, ..., 4.0)
-                    versions_to_add = [f"{major}.{v_minor}" for v_minor in range(minor, -1, -1)]
+                    major = int(match.group(1)) # 例如 4
+                    minor = int(match.group(2)) # 例如 6
+                    
+                    # [核心修改] 调整版本追溯的起始和结束点
+                    # 确保我们只生成到 1.2 版本
+                    start_minor = minor
+                    end_minor = 1 # range(x, 1, -1) 将会生成 x, x-1, ..., 2
+                    
+                    # 如果当前次版本号小于2，则只显示当前版本
+                    if minor < 2:
+                        end_minor = minor - 1
+
+                    versions_to_add = [f"{major}.{v_minor}" for v_minor in range(start_minor, end_minor, -1)]
+                    
                     self.version_combo.addItems(versions_to_add)
                     self.version_label.setVisible(True)
                     self.version_combo.setVisible(True)
-                else:
-                    # 如果 release_url 不符合预期格式
-                    self.version_label.setVisible(False)
-                    self.version_combo.setVisible(False)
             else:
                 # 如果没有提供 release_url
                 self.version_label.setVisible(False)
@@ -532,8 +544,8 @@ class NexusDialog(QDialog):
         由 BatchDownloaderWorker 的 all_finished 信号触发。
         """
         if self.progress_dialog:
-            self.progress_dialog.setValue(self.progress_dialog.maximum()) # 确保进度条达到100%
-            self.progress_dialog.close() # 关闭进度对话框
+            self.progress_dialog.setValue(self.progress_dialog.maximum())
+            self.progress_dialog.close()
         
         # 构建总结报告文本
         success_list = "\n- ".join(summary['success'])
@@ -545,7 +557,7 @@ class NexusDialog(QDialog):
         if summary['failed']:
             report += f"<p><b>失败 ({len(summary['failed'])}):</b><br>- {failed_list}</p>"
             
-        # 使用 QMessageBox 显示总结报告，允许滚动查看
+        # 使用 QMessageBox 显示总结报告
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("批量安装报告")
         msg_box.setText(report)
@@ -553,13 +565,22 @@ class NexusDialog(QDialog):
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec_()
         
-        # 刷新UI：重新加载已安装插件并过滤列表，以反映最新状态
+        # --- [核心修复] 使用 self.true_main_window 更新主程序UI ---
+        
+        # 1. 通知主窗口的插件管理器重新扫描插件目录
+        self.true_main_window.plugin_manager.scan_plugins()
+        
+        # 2. 更新主窗口右上角的固定插件栏
+        self.true_main_window.update_pinned_plugins_ui()
+
+        # 3. [推荐] 如果此对话框的直接父级是插件管理对话框，也通知它刷新列表
+        #    self.main_window 在这里指向的是直接父级
+        if hasattr(self.main_window, 'populate_plugin_list'):
+            self.main_window.populate_plugin_list()
+        
+        # 4. 最后，刷新本对话框自身的列表状态
         self.load_installed_plugins()
         self.filter_plugin_list()
-        # 通知主窗口的插件管理器重新扫描插件目录
-        self.main_window.plugin_manager.scan_plugins()
-        # 更新主窗口右上角的固定插件栏
-        self.main_window.update_pinned_plugins_ui()
 
     def on_download_finished(self, title, message):
         """
@@ -636,23 +657,38 @@ class PluginNexusPlugin(BasePlugin):
             self.dialog_instance.close()
 
     def execute(self, **kwargs):
-        """执行插件，显示插件市场对话框。"""
-        parent_widget = kwargs.get('parent_dialog', self.main_window) # 获取父窗口，通常是主窗口或插件管理对话框
+        """
+        执行插件，显示插件市场对话框。
+        此方法现在能正确处理上下文，并将 MainWindow 的引用传递给对话框。
+        """
+        # 确定对话框的直接父级。如果从插件管理对话框打开，则是它；否则是主窗口。
+        parent_widget = kwargs.get('parent_dialog', self.main_window)
+        
+        # [核心修复] self.main_window 在插件主类中，永远指向 MainWindow 实例。
+        # 我们将这个稳定的引用传递给对话框。
+        true_main_window = self.main_window 
         
         # 实现单例模式：如果对话框已存在，则重用；否则创建新实例
         if self.dialog_instance is None:
-            self.dialog_instance = NexusDialog(parent_widget, self.main_window.icon_manager, self.plugin_manager.plugins_dir)
+            # [修改] 将 true_main_window 作为新参数传递给构造函数
+            self.dialog_instance = NexusDialog(
+                parent_widget, 
+                true_main_window, 
+                true_main_window.icon_manager, 
+                self.plugin_manager.plugins_dir
+            )
             # 连接 finished 信号，当对话框关闭时，清除实例引用
             self.dialog_instance.finished.connect(lambda: setattr(self, 'dialog_instance', None))
         
-        # 如果父窗口改变，重新设置父窗口（QtUI层级关系）
+        # 如果父窗口改变（例如，上次从主菜单打开，这次从插件管理打开），
+        # 重新设置父窗口以确保正确的UI层级关系。
         if self.dialog_instance.parent() != parent_widget:
             self.dialog_instance.setParent(parent_widget)
-            # 由于父级变化，通常需要重新加载数据，以防插件管理器的状态变化
+            # 由于父级变化，重新加载本地插件状态，以防插件管理器的状态已更新
             self.dialog_instance.load_installed_plugins()
             self.dialog_instance.filter_plugin_list()
 
-        # 显示对话框并置于顶层
+        # 显示对话框并将其置于顶层
         self.dialog_instance.show()
         self.dialog_instance.raise_()
         self.dialog_instance.activateWindow()

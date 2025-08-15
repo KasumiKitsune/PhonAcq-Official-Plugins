@@ -5,6 +5,11 @@
     "file": "ipa_full.json"
   },
   {
+    "id": "ipa_broad",
+    "name": "宽式音标",
+    "file": "ipa_broad.json"
+  },
+  {
     "id": "english_ipa",
     "name": "英语音标",
     "file": "english_ipa.json"
