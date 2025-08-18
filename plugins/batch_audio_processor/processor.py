@@ -192,9 +192,21 @@ def trim_silence_numpy(audio, sr, threshold_db, padding_ms, fade_out_ms):
     first_sound = np.argmax(is_sound); last_sound = len(audio) - 1 - np.argmax(is_sound[::-1])
     start_index = max(0, first_sound - padding_samples); end_index = min(len(audio), last_sound + padding_samples)
     trimmed_audio = audio[start_index:end_index]
+    
+    # ======================== [优化开始] ========================
     if fade_out_ms > 0 and len(trimmed_audio) > 0:
         fade_samples = min(int(sr * fade_out_ms / 1000), len(trimmed_audio))
-        if fade_samples > 0: trimmed_audio[-fade_samples:] *= np.linspace(1.0, 0.0, fade_samples)
+        if fade_samples > 0:
+            # 优化前 (线性渐弱): 
+            # fade_curve = np.linspace(1.0, 0.0, fade_samples)
+            
+            # 优化后 (余弦曲线渐弱，听感更自然):
+            # 生成一个从0到π/2的序列，其cos值会平滑地从1降到0
+            fade_curve = np.cos(np.linspace(0, np.pi / 2, fade_samples))
+            
+            trimmed_audio[-fade_samples:] *= fade_curve
+    # ======================== [优化结束] ========================
+            
     return trimmed_audio
 
 class AudioProcessorWorker(QObject):
@@ -266,7 +278,7 @@ class BatchProcessorDialog(QDialog):
         self.trim_silence_check = QCheckBox("裁切首尾静音"); self.trim_silence_check.setToolTip("启用后，将自动移除音频文件开头和结尾的静音部分。")
         layout_trim_thresh, self.trim_threshold_slider = create_slider_row("阈值", -40, -60, -20, "dB", "低于此分贝的声音被视为静音。")
         layout_trim_pad, self.trim_padding_slider = create_slider_row("保留", 50, 0, 500, "ms", "在检测到的声音前后保留指定时长的静音，防止裁切过近。")
-        layout_trim_fade, self.trim_fade_out_slider = create_slider_row("渐弱", 10, 0, 100, "ms", "在裁切后的音频末尾应用渐弱效果，使结束更自然。")
+        layout_trim_fade, self.trim_fade_out_slider = create_slider_row("渐弱", 50, 0, 1000, "ms", "在裁切后的音频末尾应用渐弱效果，使结束更自然。")
         
         trim_form = QFormLayout(); trim_form.addRow(self.trim_silence_check); trim_form.addRow("静音判定阈值:", layout_trim_thresh); trim_form.addRow("首尾保留时长:", layout_trim_pad); trim_form.addRow("结尾渐弱时长:", layout_trim_fade)
         options_layout.addLayout(trim_form); options_layout.addWidget(QLabel("<hr>"))

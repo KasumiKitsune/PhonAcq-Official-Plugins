@@ -35,55 +35,110 @@ except ImportError:
 # 0. 可折叠框控件 (无变动)
 # ==============================================================================
 class CollapsibleBox(QWidget):
-    def __init__(self, title="", parent=None):
+    """
+    一个可折叠/展开的容器控件。
+    其标题栏是一个QPushButton，点击可以切换内容区域的可见性。
+    该版本使用简洁的扁平化样式，并优先使用图标作为展开/折叠的指示器。
+    """
+    def __init__(self, title="", icon_manager=None, parent=None):
+        """
+        构造函数。
+        :param title: 控件的标题文本。
+        :param icon_manager: (可选) 用于获取图标的IconManager实例。
+        :param parent: 父控件。
+        """
         super(CollapsibleBox, self).__init__(parent)
+        
+        # 保存 icon_manager 实例，如果未提供，则进行提示并准备后备方案
+        if not icon_manager:
+            print("警告: CollapsibleBox 未提供 IconManager，将回退使用文本字符作为指示器。")
+        self.icon_manager = icon_manager
+
+        # 创建并配置标题按钮
         self.toggle_button = QPushButton(title)
-        self.toggle_button.setStyleSheet("QPushButton { text-align: left; padding: 5px; border: 1px solid #ccc; background-color: #f0f0f0; font-weight: bold; }")
+        self.toggle_button.setStyleSheet("QPushButton { text-align: left; font-weight: bold; padding: 5px; }")
         self.toggle_button.setCheckable(True)
         
+        # 创建内容区域
         self.content_area = QWidget()
         self.content_layout = QVBoxLayout(self.content_area)
         self.content_layout.setContentsMargins(5, 5, 5, 5)
         self.content_layout.setSpacing(5)
 
+        # 设置主布局
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(self.toggle_button)
         main_layout.addWidget(self.content_area)
 
+        # 连接信号
         self.toggle_button.clicked.connect(self._toggle)
         
+        # 初始化为展开状态
         self.toggle_button.setChecked(True)
         self._set_arrow_icon()
 
     def _set_arrow_icon(self):
-        arrow_char = "▼" if self.toggle_button.isChecked() else "►"
+        """根据展开/折叠状态，设置按钮的图标或文本字符指示器。"""
         current_text = self.toggle_button.text()
+        # 清理文本，移除可能存在的旧字符指示器
         clean_title = current_text.lstrip('▼► ').strip()
+        
+        is_expanded = self.toggle_button.isChecked()
+
+        # 优先使用 IconManager 设置图标
+        if self.icon_manager:
+            icon_name = "arrow_down" if is_expanded else "arrow_right"
+            try:
+                icon = self.icon_manager.get_icon(icon_name)
+                self.toggle_button.setIcon(icon)
+                # 在图标和文本之间添加一个空格以增加可读性
+                self.toggle_button.setText(f" {clean_title}")
+                return # 成功设置图标后，直接返回
+            except KeyError:
+                # 如果在icon_manager中找不到指定图标，则继续执行后备方案
+                print(f"警告: CollapsibleBox 在 IconManager 中未找到图标 '{icon_name}'。")
+
+        # 后备方案：如果 icon_manager 不可用或图标不存在，则使用文本字符
+        arrow_char = "▼" if is_expanded else "►"
+        self.toggle_button.setIcon(QIcon()) # 清除可能存在的旧图标
         self.toggle_button.setText(f"{arrow_char} {clean_title}")
 
     def _toggle(self):
+        """切换内容区域的可见性，并更新指示器图标。"""
         self.content_area.setHidden(not self.toggle_button.isChecked())
         self._set_arrow_icon()
 
     def setContentLayout(self, layout):
+        """设置内容区域的布局。"""
+        # 清理旧布局
         while self.content_layout.count():
             item = self.content_layout.takeAt(0)
-            if item.widget(): item.widget().setParent(None)
+            if item.widget(): 
+                item.widget().setParent(None)
             elif item.layout():
                 self._clear_layout(item.layout())
                 item.layout().deleteLater()
+        # 添加新布局
         self.content_layout.addLayout(layout)
 
     def _clear_layout(self, layout):
+        """递归清理布局及其中的所有控件。"""
         if layout is None: return
         while layout.count():
-            item = layout.takeAt(0); widget = item.widget()
-            if widget: widget.setParent(None)
-            else: self._clear_layout(item.layout())
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget: 
+                widget.setParent(None)
+            else: 
+                self._clear_layout(item.layout())
 
     def toggle_collapsed(self, collapsed: bool):
+        """
+        通过代码控制折叠状态。
+        :param collapsed: True 表示折叠，False 表示展开。
+        """
         self.toggle_button.setChecked(not collapsed)
         self._toggle()
 
@@ -1270,7 +1325,7 @@ class ArchiveDialog(QDialog):
         scroll_layout.addWidget(self.experiment_dynamic_fields_container)
         
         # 变更历史
-        self.exp_changelog_box = CollapsibleBox("变更历史")
+        self.exp_changelog_box = CollapsibleBox("变更历史", icon_manager=self.icon_manager)
         changelog_inner_layout = QVBoxLayout()
         self.exp_changelog_table = self._create_changelog_table()
         self.exp_changelog_table.setMinimumHeight(200)
@@ -1313,7 +1368,7 @@ class ArchiveDialog(QDialog):
         scroll_layout.addWidget(self.participant_dynamic_fields_container)
 
         # 5. 变更历史 (也将被放入滚动布局中)
-        self.part_changelog_box = CollapsibleBox("变更历史")
+        self.part_changelog_box = CollapsibleBox("变更历史", icon_manager=self.icon_manager)
         part_changelog_inner_layout = QVBoxLayout()
         self.part_changelog_table = self._create_changelog_table()
     
@@ -1349,7 +1404,7 @@ class ArchiveDialog(QDialog):
         # 3. 遍历 Schema 并动态构建UI
         for group_data in schema:
             group_name = group_data.get("group_name", "未命名分组")
-            collapsible_box = CollapsibleBox(group_name)
+            collapsible_box = CollapsibleBox(group_name, icon_manager=self.icon_manager)
             
             columns = group_data.get("columns", 1)
             fields = group_data.get("fields", [])
@@ -1740,7 +1795,7 @@ class ArchiveDialog(QDialog):
         schema = self.config_manager.get_template_schema("experiment_templates", template_name)
         
         for group_data in schema:
-            collapsible_box = CollapsibleBox(group_data.get("group_name", "未命名"))
+            collapsible_box = CollapsibleBox(group_data.get("group_name", "未命名"), icon_manager=self.icon_manager)
             # ... (此处布局逻辑不变) ...
             columns = group_data.get("columns", 1); fields = group_data.get("fields", [])
             # ...

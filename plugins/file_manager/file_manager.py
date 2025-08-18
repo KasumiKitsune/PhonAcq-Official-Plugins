@@ -664,9 +664,25 @@ class FileManagerDialog(QDialog):
         # --- 右侧面板：文件视图 (QTableWidget) ---
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
+
+        # [修改] 创建包含“返回上一级”按钮和路径标签的水平布局
+        path_bar_layout = QHBoxLayout()
+        path_bar_layout.setContentsMargins(0, 0, 0, 0)
+        path_bar_layout.setSpacing(5)
+
+        self.up_button = QPushButton()
+        self.up_button.setIcon(self.icon_manager.get_icon("return"))
+        self.up_button.setToolTip("返回上一级 (Backspace)")
+        self.up_button.setObjectName("PathBarButton") # 用于QSS样式化
+
         self.current_path_label = QLabel("请选择一个目录") # 显示当前路径
         self.current_path_label.setObjectName("BreadcrumbLabel") # 用于QSS样式
-        right_layout.addWidget(self.current_path_label)
+
+        path_bar_layout.addWidget(self.up_button)
+        path_bar_layout.addWidget(self.current_path_label)
+        path_bar_layout.addStretch() # 将标签推向左侧
+
+        right_layout.addLayout(path_bar_layout) # 将新的水平布局添加到右侧面板
         
         # 搜索栏
         search_layout = QHBoxLayout()
@@ -694,6 +710,24 @@ class FileManagerDialog(QDialog):
         splitter.setSizes([280, 620]) # 设置初始分割比例
         layout.addWidget(splitter) # 将分割器添加到主布局
 
+    def _go_to_parent_directory(self):
+        """
+        [新增] 导航到当前目录的上一级目录。
+        """
+        current_path = self._get_current_dir()
+        if not current_path:
+            return
+
+        # 如果当前路径是项目根目录或回收站根目录，则不执行任何操作
+        # 使用 realpath 确保比较的准确性
+        if os.path.realpath(current_path) in [os.path.realpath(BASE_PATH), os.path.realpath(self.trash_path)]:
+            return
+            
+        parent_path = os.path.dirname(current_path)
+
+        # 调用现有的同步方法来更新整个UI
+        self._sync_nav_tree_to_path(parent_path)
+
     def _connect_signals(self):
         """连接所有UI控件的信号与槽。"""
         self.nav_tree.currentItemChanged.connect(self._on_nav_item_selected) # 左侧导航树选择改变
@@ -715,6 +749,11 @@ class FileManagerDialog(QDialog):
         QShortcut(QKeySequence.Copy, self, self._copy_items_from_selection)
         QShortcut(QKeySequence.Cut, self, self._cut_items_from_selection)
         QShortcut(QKeySequence.Paste, self, self._paste_items)
+        # [新增] 连接“返回上一级”按钮的点击事件
+        self.up_button.clicked.connect(self._go_to_parent_directory)
+
+        # [新增] 添加 Backspace 快捷键
+        QShortcut(QKeySequence.Backspace, self, self._go_to_parent_directory)
 
     def _populate_nav_tree(self):
         """
@@ -912,6 +951,12 @@ class FileManagerDialog(QDialog):
         self.file_view.setRowCount(0)
         self.file_view.setSortingEnabled(False)
         QApplication.processEvents()
+
+        # [新增] 根据当前路径更新“返回上一级”按钮的启用状态
+        # 如果当前位于项目根目录或回收站根目录，则禁用按钮
+        is_at_root = os.path.realpath(dir_path) == os.path.realpath(BASE_PATH)
+        is_at_trash_root = os.path.realpath(dir_path) == os.path.realpath(self.trash_path)
+        self.up_button.setEnabled(not (is_at_root or is_at_trash_root))
 
         is_in_trash = os.path.realpath(dir_path) == os.path.realpath(self.trash_path)
         trash_metadata = {} # 默认为空字典
@@ -2117,15 +2162,19 @@ class FileManagerDialog(QDialog):
 
 # [新增 v1.2] 左侧导航树的右键菜单处理器
     def _show_nav_tree_context_menu(self, position):
-        """当用户在左侧导航树上右键点击时调用。"""
+        """
+        当用户在左侧导航树上右键点击时调用。
+        根据被点击的条目类型（回收站或普通目录），动态构建并显示相应的上下文菜单。
+        """
         item = self.nav_tree.itemAt(position)
         if not item:
-            return # 如果点击在空白处，则不显示菜单
+            return  # 如果点击在空白处，则不显示菜单
 
-        # 检查被点击的条目是否是我们标记的“回收站”
+        menu = QMenu(self.nav_tree)
+        path = item.data(0, Qt.UserRole) # 获取条目关联的路径
+
+        # --- 场景 1: 如果是特殊的“回收站”条目 ---
         if item.data(0, Qt.UserRole + 1) == "trash_item":
-            menu = QMenu(self.nav_tree)
-            
             # 添加“清空回收站”选项
             clear_action = menu.addAction(self.icon_manager.get_icon("clear_contents"), "清空回收站...")
             clear_action.triggered.connect(self._empty_trash)
@@ -2136,6 +2185,31 @@ class FileManagerDialog(QDialog):
             policy_action = menu.addAction(self.icon_manager.get_icon("settings"), "配置清理策略...")
             policy_action.triggered.connect(self._open_trash_policy_dialog)
 
+        # --- 场景 2: 如果是普通的目录条目 ---
+        else:
+            # --- 功能 1: 展开/折叠 ---
+            # 根据当前状态动态设置文本和图标
+            if item.isExpanded():
+                expand_action = menu.addAction(self.icon_manager.get_icon("arrow_up"), "折叠该目录")
+            else:
+                expand_action = menu.addAction(self.icon_manager.get_icon("arrow_right"), "展开该目录")
+            
+            # 如果目录没有子项，则禁用此功能
+            expand_action.setEnabled(item.childCount() > 0)
+            # 连接信号，点击后切换展开状态
+            expand_action.triggered.connect(lambda: item.setExpanded(not item.isExpanded()))
+
+            # --- 功能 2: 在文件资源管理器中显示 ---
+            if path and os.path.exists(path):
+                menu.addSeparator()
+                # 添加“在文件资源管理器中显示”选项
+                open_in_explorer_action = menu.addAction(self.icon_manager.get_icon("show_in_explorer"), "用系统文件管理器打开")
+                # [核心修复] lambda 现在接受并忽略 triggered 信号发出的布尔值
+                open_in_explorer_action.triggered.connect(lambda checked, p=path: self._open_items([p]))
+        
+        # --- 显示菜单 ---
+        # 只有当菜单中有内容时才显示
+        if menu.actions():
             menu.exec_(self.nav_tree.viewport().mapToGlobal(position))
 
     # [新增 v1.2] “清空回收站”的逻辑实现
