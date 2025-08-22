@@ -296,7 +296,7 @@ class WelcomeDialog(QDialog):
             f"<span style='font-size:14pt; font-weight:bold;'> Assistant</span>"
         )
         
-        version_str = "v1.7.5" 
+        version_str = getattr(self.parent_window, 'app_version', 'v?.?.?')
         version_label = QLabel(f"版本 {version_str}")
         version_label.setObjectName("VersionLabel")
         version_label.setFont(QFont("Microsoft YaHei", 12))

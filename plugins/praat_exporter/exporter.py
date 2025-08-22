@@ -4,7 +4,7 @@ import os
 import sys
 from functools import partial
 import re
-
+import html
 from PyQt5.QtWidgets import (QAction, QFileDialog, QMessageBox, QDialog, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton,
                              QListWidget, QListWidgetItem, QGroupBox, QSplitter, QInputDialog,
@@ -203,7 +203,43 @@ class AnnotationWorkbenchDialog(QDialog):
         """构建标注工作台的用户界面。"""
         main_layout = QVBoxLayout(self)
         
-        info_label = QLabel(f"<b>文件:</b> {os.path.basename(self.audio_filepath)} | <b>总时长:</b> {self.total_duration:.3f}s")
+        # 1. 获取原始文件名
+        base_filename = os.path.basename(self.audio_filepath)
+        duration_text = f" | <b>总时长:</b> {self.total_duration:.3f}s"
+        
+        # 2. 设定最大字符数并进行截断
+        MAX_FILENAME_CHARS = 40  # 您可以根据需要调整这个数字
+        
+        if len(base_filename) > MAX_FILENAME_CHARS:
+            # 从文件名开头截取，并在末尾添加省略号
+            truncated_filename = base_filename[:MAX_FILENAME_CHARS] + "..."
+        else:
+            truncated_filename = base_filename
+            
+        # 3. 组合最终的文本并设置给 QLabel
+        full_text = f"<b>文件:</b> {truncated_filename}{duration_text}"
+        info_label = QLabel(full_text)
+        
+        # --- [核心修改] ---
+        # 1. 设定 ToolTip 的最大像素宽度
+        MAX_TOOLTIP_WIDTH = 500  # 您可以根据需要调整这个宽度值
+
+        # 2. 对文件路径进行HTML转义，防止路径中的特殊字符（如 '<' 或 '>'）被误认为是HTML标签
+        escaped_filepath = html.escape(self.audio_filepath)
+        
+        # 3. 创建一个富文本格式的字符串
+        #    我们使用一个 <p> 标签，并通过 style 属性来设置它的宽度。
+        #    Qt的渲染引擎会自动处理 <p> 标签内文本的换行。
+        rich_text_tooltip = (
+            f'<p style="width: {MAX_TOOLTIP_WIDTH}px;">'
+            f'<b>完整路径:</b><br>{escaped_filepath}'  # 使用<br>让路径从新的一行开始，更清晰
+            f'</p>'
+        )
+
+        # 4. 将富文本 ToolTip 设置给标签
+        info_label.setToolTip(rich_text_tooltip)
+        # --- [修改结束] ---
+        
         main_layout.addWidget(info_label, 0)
 
         splitter = QSplitter(Qt.Horizontal)
