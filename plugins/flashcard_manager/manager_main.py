@@ -1126,16 +1126,41 @@ class DeckStudioDialog(QDialog):
         """为当前卡片设置或更换图片。"""
         current_item = self.card_list_widget.currentItem()
         if not current_item or current_item.data(self.ADD_NEW_CARD_ROLE): return
-        row = self.card_list_widget.row(current_item); card_id = self.manifest_data['cards'][row]['id']
+        row = self.card_list_widget.row(current_item)
+        card = self.manifest_data['cards'][row]
+        card_id = card['id']
+
         filepath, _ = QFileDialog.getOpenFileName(self, "选择图片文件", "", "图片文件 (*.png *.jpg *.jpeg *.bmp)")
         if not filepath: return
-        images_dir = os.path.join(self.working_dir, 'images'); os.makedirs(images_dir, exist_ok=True)
-        ext = os.path.splitext(filepath)[1]; dest_filename = f"{card_id}{ext}"; dest_path = os.path.join(images_dir, dest_filename)
+        
+        # [OPTIMIZATION] 在更新前，获取旧的相对路径
+        old_relative_path = card.get('image_path', '')
+
+        images_dir = os.path.join(self.working_dir, 'images')
+        os.makedirs(images_dir, exist_ok=True)
+        ext = os.path.splitext(filepath)[1]
+        dest_filename = f"{card_id}{ext}"
+        dest_path = os.path.join(images_dir, dest_filename)
+        
         try:
-            shutil.copy2(filepath, dest_path); relative_path = os.path.join('images', dest_filename).replace("\\", "/")
-            self.manifest_data['cards'][row]['image_path'] = relative_path
-            self.card_image_preview.set_pixmap(QPixmap(dest_path)); self._update_ui_state()
-        except Exception as e: QMessageBox.critical(self, "设置图片失败", f"无法复制图片文件：\n{e}")
+            shutil.copy2(filepath, dest_path)
+            new_relative_path = os.path.join('images', dest_filename).replace("\\", "/")
+            
+            # 更新 manifest
+            card['image_path'] = new_relative_path
+            
+            # 更新UI
+            self.card_image_preview.set_pixmap(QPixmap(dest_path))
+            self._update_ui_state()
+
+            # [OPTIMIZATION] 如果旧文件存在且与新文件不同，则删除旧文件
+            if old_relative_path and old_relative_path != new_relative_path:
+                old_full_path = os.path.join(self.working_dir, old_relative_path)
+                if os.path.exists(old_full_path):
+                    os.remove(old_full_path)
+
+        except Exception as e: 
+            QMessageBox.critical(self, "设置图片失败", f"无法复制图片文件：\n{e}")
 
     def _clear_card_image(self):
         """清除当前卡片的图片关联。"""
@@ -1162,28 +1187,50 @@ class DeckStudioDialog(QDialog):
     def _set_card_audio(self, audioType='word'):
         current_item = self.card_list_widget.currentItem()
         if not current_item or current_item.data(self.ADD_NEW_CARD_ROLE): return
-        row = self.card_list_widget.row(current_item); card_id = self.manifest_data['cards'][row]['id']
+        row = self.card_list_widget.row(current_item)
+        card = self.manifest_data['cards'][row]
+        card_id = card['id']
+        
         filepath, _ = QFileDialog.getOpenFileName(self, f"选择{'例句' if audioType == 'sentence' else '单词'}音频文件", "", "音频文件 (*.wav *.mp3 *.flac *.ogg)")
         if not filepath: return
 
-        # [修改] 根据 audioType 确定目标子目录和路径键
         subdir = 'sentence' if audioType == 'sentence' else 'audio'
         path_key = 'sentence_audio_path' if audioType == 'sentence' else 'audio_path'
+        
+        # [OPTIMIZATION] 在更新前，获取旧的相对路径
+        old_relative_path = card.get(path_key, '')
 
-        audio_dir = os.path.join(self.working_dir, subdir); os.makedirs(audio_dir, exist_ok=True)
-        ext = os.path.splitext(filepath)[1]; dest_filename = f"{card_id}{ext}"; dest_path = os.path.join(audio_dir, dest_filename)
+        audio_dir = os.path.join(self.working_dir, subdir)
+        os.makedirs(audio_dir, exist_ok=True)
+        ext = os.path.splitext(filepath)[1]
+        dest_filename = f"{card_id}{ext}"
+        dest_path = os.path.join(audio_dir, dest_filename)
+        
         try:
-            shutil.copy2(filepath, dest_path); relative_path = os.path.join(subdir, dest_filename).replace("\\", "/")
-            self.manifest_data['cards'][row][path_key] = relative_path
+            shutil.copy2(filepath, dest_path)
+            new_relative_path = os.path.join(subdir, dest_filename).replace("\\", "/")
             
-            # [修改] 更新正确的UI标签
+            # 更新 manifest
+            card[path_key] = new_relative_path
+            
+            # 更新UI
             if audioType == 'sentence':
-                self.sentence_audio_label.setText(dest_filename); self.play_sentence_audio_btn.setEnabled(True)
+                self.sentence_audio_label.setText(dest_filename)
+                self.play_sentence_audio_btn.setEnabled(True)
             else:
-                self.card_audio_label.setText(dest_filename); self.play_audio_btn.setEnabled(True)
+                self.card_audio_label.setText(dest_filename)
+                self.play_audio_btn.setEnabled(True)
             
             self._update_ui_state()
-        except Exception as e: QMessageBox.critical(self, "设置音频失败", f"无法复制音频文件：\n{e}")
+
+            # [OPTIMIZATION] 如果旧文件存在且与新文件不同，则删除旧文件
+            if old_relative_path and old_relative_path != new_relative_path:
+                old_full_path = os.path.join(self.working_dir, old_relative_path)
+                if os.path.exists(old_full_path):
+                    os.remove(old_full_path)
+
+        except Exception as e: 
+            QMessageBox.critical(self, "设置音频失败", f"无法复制音频文件：\n{e}")
     
     def _clear_card_audio(self, audioType='word'):
         """清除当前卡片的音频关联。"""
@@ -1235,11 +1282,13 @@ class DeckStudioDialog(QDialog):
         return repaired_count > 0  # 返回是否有任何媒体路径被修复
 
     def _batch_import_media(self, media_type):
-        if not self.working_dir: QMessageBox.warning(self, "操作无效", "请先加载一个卡组。"); return
+        if not self.working_dir: 
+            QMessageBox.warning(self, "操作无效", "请先加载一个卡组。")
+            return
+        
         source_dir = QFileDialog.getExistingDirectory(self, f"选择包含媒体文件的文件夹")
         if not source_dir: return
 
-        # [修改] 扩展媒体类型映射
         type_map = {
             'image': ('images', 'image_path'),
             'word': ('audio', 'audio_path'),
@@ -1249,20 +1298,51 @@ class DeckStudioDialog(QDialog):
         
         target_subdir, target_key = type_map[media_type]
         
-        dest_dir = os.path.join(self.working_dir, target_subdir); os.makedirs(dest_dir, exist_ok=True)
+        dest_dir = os.path.join(self.working_dir, target_subdir)
+        os.makedirs(dest_dir, exist_ok=True)
         cards_by_id = {card['id']: card for card in self.manifest_data.get('cards', [])}
         found_count, not_found_count = 0, 0
+        
         for filename in os.listdir(source_dir):
             file_id, ext = os.path.splitext(filename)
             if file_id in cards_by_id:
-                src_path = os.path.join(source_dir, filename); dest_path = os.path.join(dest_dir, filename)
+                card = cards_by_id[file_id]
+                
+                # [OPTIMIZATION] 1. 获取旧文件路径
+                old_relative_path = card.get(target_key, '')
+
+                # 2. 复制新文件
+                src_path = os.path.join(source_dir, filename)
+                dest_path = os.path.join(dest_dir, filename)
                 shutil.copy2(src_path, dest_path)
-                cards_by_id[file_id][target_key] = os.path.join(target_subdir, filename).replace("\\", "/")
+                
+                # 3. 更新 manifest
+                new_relative_path = os.path.join(target_subdir, filename).replace("\\", "/")
+                card[target_key] = new_relative_path
                 found_count += 1
-            else: not_found_count += 1
+
+                # [OPTIMIZATION] 4. 如果旧文件存在且不同，则删除
+                if old_relative_path and old_relative_path != new_relative_path:
+                    old_full_path = os.path.join(self.working_dir, old_relative_path)
+                    if os.path.exists(old_full_path):
+                        try:
+                            os.remove(old_full_path)
+                        except OSError as e:
+                            print(f"Warning: Could not remove old media file {old_full_path}: {e}")
+
+            else:
+                not_found_count += 1
+        
+        # [OPTIMIZATION] 修复保存按钮不激活的问题
         if found_count > 0:
-            self._on_card_selected(self.card_list_widget.currentItem(), self.card_list_widget.currentItem())
+            # 刷新当前卡片详情视图，以显示新导入的媒体（如果正好是当前卡片）
+            current_item = self.card_list_widget.currentItem()
+            if current_item and not current_item.data(self.ADD_NEW_CARD_ROLE):
+                self._populate_card_details(current_item)
+            
+            # 触发UI状态检查，这将检测到manifest已更改并激活保存按钮
             self._update_ui_state()
+
         QMessageBox.information(self, "批量导入完成", f"成功匹配并导入 {found_count} 个文件。\n{not_found_count} 个文件未找到匹配的卡片ID。")
 
     # --- 文件系统操作 (新建、显示、复制、删除) ---
