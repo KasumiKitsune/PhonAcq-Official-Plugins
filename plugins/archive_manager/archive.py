@@ -1720,7 +1720,18 @@ class ArchiveDialog(QDialog):
         
         participants = self.data_manager.get_participants(experiment_name)
         if not participants:
-            self._add_placeholder_item("该实验下没有受试者档案。点击“新建受试者”开始。")
+            # [核心修复] 使用 AnimatedListWidget 的 setHierarchicalData API 来显示占位符
+            placeholder_data = [{
+                'type': 'placeholder',  # 自定义类型，表示这是一个不可交互的占位符
+                'text': "该实验下没有受试者档案。点击“新建受试者”开始。",
+                'icon': self.icon_manager.get_icon("info") # 使用一个信息图标
+            }]
+            self.item_list.setHierarchicalData(placeholder_data)
+    
+            # 将列表项设置为不可选、不可交互
+            if self.item_list.count() > 0:
+                self.item_list.item(0).setFlags(Qt.NoItemFlags)
+    
             self._clear_participant_form() # 如果实验为空，则清空表单
             return
 

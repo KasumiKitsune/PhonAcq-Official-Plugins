@@ -157,121 +157,79 @@ class LayerConfigDialog(QDialog):
 
     def _init_ui(self):
         """
-        [v9.0 - 音频加载整合版]
+        [v12.0 - Tier选择同步版]
         初始化图层配置对话框的用户界面。
-        
-        此版本的核心改动是将“音频文件”的加载功能整合到了数据源配置的核心流程中，
-        使其成为与数据文件、TextGrid文件并列的一等公民。
+        - 新增了用于选择TextGrid Tier的下拉菜单，并初始隐藏。
         """
-        # --- 1. 顶层容器和主布局 ---
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
-        form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows) # 确保长标签能正确换行
+        form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
-        # ======================================================================
-        # 2. 数据源配置区域
-        # ======================================================================
-        
-        # -- 2.1. 图层名称 --
         self.name_edit = QLineEdit(self.config.get('name', ''))
         self.name_edit.setPlaceholderText("例如：说话人A-男声")
         self.name_edit.setToolTip("为该数据图层指定一个唯一的、有意义的名称。")
 
-        # -- 2.2. 数据文件 (Excel/CSV) --
         data_layout = QHBoxLayout()
         self.load_data_btn = QPushButton("选择文件...")
         self.load_data_btn.setToolTip("加载包含共振峰数据的 Excel (.xlsx, .xls) 或 CSV (.csv) 文件。")
         self.data_file_label = QLabel(self.config.get('data_filename', "未选择"))
         self.data_file_label.setWordWrap(True)
-        data_layout.addWidget(self.load_data_btn)
-        data_layout.addWidget(self.data_file_label, 1) # 标签占据伸缩空间
+        data_layout.addWidget(self.load_data_btn); data_layout.addWidget(self.data_file_label, 1)
 
-        # -- 2.3. TextGrid 文件 --
         tg_layout = QHBoxLayout()
         self.load_tg_btn = QPushButton("选择文件...")
         self.load_tg_btn.setToolTip("加载 TextGrid (.TextGrid) 文件为数据点添加标签。\n数据文件必须包含 'timestamp' 列。")
         self.tg_file_label = QLabel(self.config.get('tg_filename', "未选择 (可选)"))
         self.tg_file_label.setWordWrap(True)
-        tg_layout.addWidget(self.load_tg_btn)
-        tg_layout.addWidget(self.tg_file_label, 1)
+        tg_layout.addWidget(self.load_tg_btn); tg_layout.addWidget(self.tg_file_label, 1)
 
-        # --- 音频文件选择 (核心修复) ---
+        # [核心新增] 创建用于选择TextGrid层的下拉菜单及其标签
+        self.tg_tier_combo = QComboBox()
+        self.tg_tier_combo.setToolTip("从加载的 TextGrid 文件中选择一个层(Tier)作为标注来源。")
+        self.tg_tier_label = QLabel("选择层(Tier):")
+
         audio_layout = QHBoxLayout()
         self.load_audio_btn = QPushButton("选择文件...")
         self.load_audio_btn.setToolTip("为该图层加载关联的音频文件，以便进行片段播放。")
-
-        # [核心修复] 增加对 None 值的安全检查
         audio_path = self.config.get('audio_path')
-        if audio_path and isinstance(audio_path, str):
-            audio_filename_display = os.path.basename(audio_path)
-        else:
-            audio_filename_display = "未选择 (可选)"
-            
+        audio_filename_display = os.path.basename(audio_path) if audio_path and isinstance(audio_path, str) else "未选择 (可选)"
         self.audio_file_label = QLabel(audio_filename_display)
         self.audio_file_label.setWordWrap(True)
-        
         self.load_audio_btn.setEnabled(self.tg is not None)
-        audio_layout.addWidget(self.load_audio_btn)
-        audio_layout.addWidget(self.audio_file_label, 1)
+        audio_layout.addWidget(self.load_audio_btn); audio_layout.addWidget(self.audio_file_label, 1)
 
-        # ======================================================================
-        # 3. 列映射与样式配置区域
-        # ======================================================================
-
-        # -- 3.1. 列映射 --
-        self.f1_combo = QComboBox()
-        self.f1_combo.setToolTip("选择代表第一共振峰 (F1) 的数据列，将作为图表的 Y 轴。")
-        
-        self.f2_combo = QComboBox()
-        self.f2_combo.setToolTip("选择代表第二共振峰 (F2) 的数据列，将作为图表的 X 轴。")
-        
-        self.group_by_combo = QComboBox()
-        self.group_by_combo.setToolTip("选择用于对数据点进行分组的列。\n选择'无分组'则所有点使用相同样式。\n使用TextGrid后，可选择 'textgrid_label' 进行分组。")
-        
-        # -- 3.2. 图层级样式 --
-        self.color_scheme_combo = QComboBox()
-        self.color_scheme_combo.addItems(self.parent_dialog.COLOR_SCHEMES.keys())
-        self.color_scheme_combo.setToolTip("为该图层内的分组选择一个独立的颜色方案。")
-        
+        self.f1_combo = QComboBox(); self.f2_combo = QComboBox(); self.group_by_combo = QComboBox()
+        self.color_scheme_combo = QComboBox(); self.color_scheme_combo.addItems(self.parent_dialog.COLOR_SCHEMES.keys())
         self.lock_check = QCheckBox("锁定图层")
-        self.lock_check.setToolTip("锁定后，图层将无法在主界面被配置或移除，防止误操作。")
-
-        # ======================================================================
-        # 4. 组装UI
-        # ======================================================================
-
-        # -- 将所有行添加到表单布局 --
+        
         form_layout.addRow("图层名称:", self.name_edit)
         form_layout.addRow("数据文件:", data_layout)
         form_layout.addRow("TextGrid:", tg_layout)
-        form_layout.addRow("音频文件:", audio_layout) # 新增行
-        
-        # 添加一个视觉分隔线
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
+        # [核心新增] 将Tier选择UI添加到布局中
+        form_layout.addRow(self.tg_tier_label, self.tg_tier_combo)
+        form_layout.addRow("音频文件:", audio_layout)
+        separator = QFrame(); separator.setFrameShape(QFrame.HLine); separator.setFrameShadow(QFrame.Sunken)
         form_layout.addRow(separator)
-        
-        form_layout.addRow("F1 (Y轴):", self.f1_combo)
-        form_layout.addRow("F2 (X轴):", self.f2_combo)
-        form_layout.addRow("分组依据:", self.group_by_combo)
-        form_layout.addRow("颜色方案:", self.color_scheme_combo)
+        form_layout.addRow("F1 (Y轴):", self.f1_combo); form_layout.addRow("F2 (X轴):", self.f2_combo)
+        form_layout.addRow("分组依据:", self.group_by_combo); form_layout.addRow("颜色方案:", self.color_scheme_combo)
         form_layout.addRow(self.lock_check)
 
-        layout.addLayout(form_layout)
+        # [核心新增] 初始时隐藏Tier选择功能
+        self.tg_tier_label.hide()
+        self.tg_tier_combo.hide()
         
-        # -- 标准的 OK/Cancel 按钮 --
+        layout.addLayout(form_layout)
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
+        button_box.accepted.connect(self.accept); button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
     def _connect_signals(self):
         """连接UI控件的信号到槽函数。"""
         self.load_data_btn.clicked.connect(self._load_data)
         self.load_tg_btn.clicked.connect(self._load_textgrid)
-        # [核心新增] 连接加载音频按钮的信号
         self.load_audio_btn.clicked.connect(self._load_audio)
+        # [核心新增] 连接Tier选择下拉框的信号，当用户切换Tier时，自动应用
+        self.tg_tier_combo.currentTextChanged.connect(self._apply_selected_tier_to_df)
 
     def _load_audio(self):
         """
@@ -300,45 +258,40 @@ class LayerConfigDialog(QDialog):
 
     def _populate_from_config(self):
         """
-        [v10.4 - UI状态恢复修复版]
-        根据传入的配置字典填充UI控件。
-        - 增加了在恢复TextGrid后，明确更新“选择音频”按钮状态的逻辑。
+        [v12.0 - 顽固Bug最终修复版]
+        根据传入的配置字典，完整地填充对话框中所有UI控件的状态。
         """
-        self.df = self.config.get('df')
-        self.tg = self.config.get('tg') # 恢复 TextGrid 对象
-        
-        if 'data_filename' in self.config:
-            self.data_file_label.setText(self.config['data_filename'])
-        if 'tg_filename' in self.config:
-            self.tg_file_label.setText(self.config['tg_filename'])
-        
-        # [核心修复] 在恢复 self.tg 后，立即更新依赖于它的UI控件的状态
-        if self.tg is not None:
-            self.load_audio_btn.setEnabled(True)
-        else:
-            self.load_audio_btn.setEnabled(False)
-
-        # 恢复音频文件标签
+        self.df = self.config.get('df'); self.tg = self.config.get('tg')
+        if 'data_filename' in self.config: self.data_file_label.setText(self.config['data_filename'])
+        if 'tg_filename' in self.config: self.tg_file_label.setText(self.config['tg_filename'])
+        self.load_audio_btn.setEnabled(self.tg is not None)
         audio_path = self.config.get('audio_path')
-        if audio_path and isinstance(audio_path, str):
-            self.audio_file_label.setText(os.path.basename(audio_path))
-        else:
-            self.audio_file_label.setText("未选择 (可选)")
-
+        if audio_path and isinstance(audio_path, str): self.audio_file_label.setText(os.path.basename(audio_path))
+        else: self.audio_file_label.setText("未选择 (可选)")
         self.color_scheme_combo.setCurrentText(self.config.get('color_scheme', '默认'))
         self.lock_check.setChecked(self.config.get('locked', False))
+        
+        tier_was_applied = False
+        if self.tg:
+            interval_tiers = [tier.name for tier in self.tg if isinstance(tier, textgrid.IntervalTier)]
+            if interval_tiers:
+                self.tg_tier_combo.addItems(interval_tiers); self.tg_tier_label.show(); self.tg_tier_combo.show()
+                saved_tier = self.config.get('tg_tier')
+                if saved_tier and saved_tier in interval_tiers: self.tg_tier_combo.setCurrentText(saved_tier)
+                self._apply_selected_tier_to_df()
+                tier_was_applied = True
 
-        # 后续的 combobox 更新逻辑保持不变
-        self._update_combos()
-        self.f1_combo.setCurrentText(self.config.get('f1_col', ''))
-        self.f2_combo.setCurrentText(self.config.get('f2_col', ''))
-        self.group_by_combo.setCurrentText(self.config.get('group_col', ''))
+        if not tier_was_applied:
+             self._update_combos(preferred_group_col=self.config.get('group_col'))
+        
+        if self.config.get('f1_col'): self.f1_combo.setCurrentText(self.config.get('f1_col'))
+        if self.config.get('f2_col'): self.f2_combo.setCurrentText(self.config.get('f2_col'))
 
     def _load_data(self):
         """
-        [v10.3 - 即时匹配TextGrid版]
-        加载数据文件。加载成功后，会立即调用主对话框的逻辑来
-        自动查找并关联同名的TextGrid文件。
+        [v12.0 - UI同步修复版]
+        加载数据文件。加载成功后，会立即尝试自动匹配TextGrid，
+        并在加载新数据时正确重置TextGrid相关的UI状态。
         """
         path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "表格文件 (*.xlsx *.xls *.csv)")
         if not path: return
@@ -346,7 +299,7 @@ class LayerConfigDialog(QDialog):
         try:
             df = pd.read_excel(path) if path.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(path)
             
-            # --- 自动拆分逻辑 (保持不变) ---
+            # 自动拆分逻辑 (如果CSV包含 'source_file' 列)
             if path.lower().endswith('.csv') and 'source_file' in df.columns:
                 reply = QMessageBox.question(self, "检测到合并数据", "此CSV文件包含 'source_file' 列，是否自动拆分为多个图层？", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
                 if reply == QMessageBox.Yes:
@@ -355,7 +308,7 @@ class LayerConfigDialog(QDialog):
                     self.accept()
                     return
 
-            # --- 更新当前对话框的内部状态 (保持不变) ---
+            # 更新当前对话框的内部状态
             self.df = df
             base_filename = os.path.basename(path)
             layer_name_base = os.path.splitext(base_filename)[0]
@@ -366,30 +319,40 @@ class LayerConfigDialog(QDialog):
             if not self.name_edit.text():
                 self.name_edit.setText(layer_name_base)
         
+            # --- [核心修复] ---
+            # 加载新数据文件时，彻底重置所有TextGrid相关的状态
             self.tg = None
             self.tg_file_label.setText("未选择 (可选)")
             self.config.pop('tg_filename', None)
+            self.config.pop('original_tg_path', None)
+            
+            # 隐藏并清空Tier选择UI，确保界面状态同步
+            self.tg_tier_label.hide()
+            self.tg_tier_combo.hide()
+            self.tg_tier_combo.clear()
+            # --- [修复结束] ---
             
             self._update_combos()
 
-            # --- [核心修改] 立即触发自动匹配 ---
-            # 1. 临时构建一个包含核心信息的配置字典
-            temp_config_for_matching = {
-                'name': self.name_edit.text(),
-                'df': self.df
-            }
-            # 2. 调用父对话框（PlotterDialog）的自动匹配方法
+            # 立即触发自动匹配
+            temp_config_for_matching = {'name': self.name_edit.text(), 'df': self.df}
             self.parent_dialog._auto_match_textgrid_for_layer(temp_config_for_matching)
             
-            # 3. 将匹配结果（如果成功）更新回当前对话框的配置和UI
+            # 将匹配结果（如果成功）更新回当前对话框的配置和UI
             if temp_config_for_matching.get('tg') is not None:
-                self.config['tg'] = temp_config_for_matching['tg']
-                self.config['tg_filename'] = temp_config_for_matching['tg_filename']
-                self.tg = temp_config_for_matching['tg'] # 更新内部tg对象
+                self.config.update(temp_config_for_matching)
+                self.tg = temp_config_for_matching['tg']
                 self.tg_file_label.setText(temp_config_for_matching['tg_filename'])
                 self.load_audio_btn.setEnabled(True)
-                # 再次更新combos，以确保'textgrid_label'被选中
-                self._apply_textgrid()
+                
+                # 重新填充并应用Tier
+                self.tg_tier_combo.clear()
+                interval_tiers = [tier.name for tier in self.tg if isinstance(tier, textgrid.IntervalTier)]
+                if interval_tiers:
+                    self.tg_tier_combo.addItems(interval_tiers)
+                    self.tg_tier_label.show()
+                    self.tg_tier_combo.show()
+                    self._apply_selected_tier_to_df()
 
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"无法读取数据文件: {e}")
@@ -431,11 +394,7 @@ class LayerConfigDialog(QDialog):
             self.split_layers.append(layer_config)
 
     def _load_textgrid(self, filepath=None):
-        """
-        [v10.0 - 路径记录版]
-        加载 TextGrid 文件，并记录其原始路径。
-        """
-        # ... (前面的代码保持不变) ...
+        path_to_load = filepath
         if not path_to_load:
             if self.df is None or 'timestamp' not in self.df.columns:
                 QMessageBox.warning(self, "需要时间戳", "请先加载一个包含 'timestamp' 列的数据文件。")
@@ -449,23 +408,39 @@ class LayerConfigDialog(QDialog):
             filename = os.path.basename(path_to_load)
             self.tg_file_label.setText(filename)
             self.config['tg_filename'] = filename
-            # [核心新增] 记录文件的原始绝对路径，以便导出时复制
             self.config['original_tg_path'] = path_to_load
-            self._apply_textgrid()
+
+            # --- [核心修改] ---
+            self.tg_tier_combo.clear()
+            interval_tiers = [tier.name for tier in self.tg if isinstance(tier, textgrid.IntervalTier)]
+            if interval_tiers:
+                self.tg_tier_combo.addItems(interval_tiers)
+                self.tg_tier_label.show()
+                self.tg_tier_combo.show()
+                self._apply_selected_tier_to_df() 
+            else:
+                QMessageBox.warning(self, "未找到有效的层", "此 TextGrid 文件中不包含任何 IntervalTier。")
+                self.tg_tier_label.hide()
+                self.tg_tier_combo.hide()
+            # --- [修改结束] ---
+
             self.load_audio_btn.setEnabled(True)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"无法解析 TextGrid 文件: {e}")
-            self.tg = None
-            self.load_audio_btn.setEnabled(False)
-            # [核心新增] 加载失败时清理路径记录
+            self.tg = None; self.load_audio_btn.setEnabled(False)
             self.config.pop('original_tg_path', None)
 
-    def _update_combos(self):
+    def _update_combos(self, preferred_group_col=None): # [核心修复] 增加可选参数
         """根据当前加载的 DataFrame 更新 F1, F2 和分组列的下拉选项。"""
+        # --- [核心修改开始] ---
+        # 1. 保存当前分组依据的值，防止被 clear() 清掉
+        current_group_text = preferred_group_col if preferred_group_col else self.group_by_combo.currentText()
+        # --- [核心修改结束] ---
+        
         self.f1_combo.clear()
         self.f2_combo.clear()
         self.group_by_combo.clear()
-        self.group_by_combo.addItem("无分组") # 默认选项
+        self.group_by_combo.addItem("无分组")
 
         if self.df is None: return
 
@@ -475,58 +450,71 @@ class LayerConfigDialog(QDialog):
         self.f1_combo.addItems(numeric_cols)
         self.f2_combo.addItems(numeric_cols)
         
-        # 添加非数值列作为分组选项
         non_numeric_cols = [col for col in all_cols if col not in numeric_cols]
         if non_numeric_cols:
             self.group_by_combo.addItems(non_numeric_cols)
         
-        # 如果有数值列，也添加进去（可选分组）
         if numeric_cols:
-            if non_numeric_cols: # 如果前面有非数值列，加个分隔符
+            if non_numeric_cols:
                 self.group_by_combo.insertSeparator(self.group_by_combo.count())
             self.group_by_combo.addItems(numeric_cols)
 
-        # 尝试自动选择F1/F2列
+        # 自动猜测F1/F2列
         f1 = next((c for c in numeric_cols if 'f1' in c.lower()), numeric_cols[0] if numeric_cols else "")
         f2 = next((c for c in numeric_cols if 'f2' in c.lower()), numeric_cols[1] if len(numeric_cols) > 1 else "")
         self.f1_combo.setCurrentText(f1)
         self.f2_combo.setCurrentText(f2)
 
-        # 尝试自动选择TextGrid标签列作为分组
-        if 'textgrid_label' in all_cols:
+        # --- [核心修改开始] ---
+        # 2. 恢复或设置分组依据
+        # 检查之前保存的值是否存在于新的列名列表中
+        if current_group_text and current_group_text in all_cols:
+            self.group_by_combo.setCurrentText(current_group_text)
+        elif 'textgrid_label' in all_cols: # 兼容旧逻辑
             self.group_by_combo.setCurrentText('textgrid_label')
-        else:
-            # 尝试选择包含“vowel”或“label”的列作为默认分组
+        else: 
+            # 如果之前的选择不存在，再执行自动猜测作为后备方案
             default_group = next((c for c in all_cols if 'vowel' in c.lower() or 'label' in c.lower()), "无分组")
             self.group_by_combo.setCurrentText(default_group)
+        # --- [核心修改结束] ---
 
-    def _apply_textgrid(self):
-        """将 TextGrid 的标注应用到 DataFrame，创建 'textgrid_label' 列。"""
+    def _apply_selected_tier_to_df(self):
+        """
+        [核心重构] 将TextGrid中当前选中的层(Tier)的标注应用到DataFrame。
+        会创建一个以层名称命名的动态列。
+        """
         if self.df is None or self.tg is None: return
-        
-        # 移除旧的 textgrid_label 列，如果存在
-        if 'textgrid_label' in self.df.columns:
-            self.df = self.df.drop(columns=['textgrid_label'])
 
+        selected_tier_name = self.tg_tier_combo.currentText()
+        if not selected_tier_name: return
+
+        # 1. [核心修复] 更精确地清理旧列
+        for tier in self.tg:
+            if isinstance(tier, textgrid.IntervalTier) and tier.name in self.df.columns:
+                self.df = self.df.drop(columns=[tier.name])
+        if 'textgrid_label' in self.df.columns:
+             self.df = self.df.drop(columns=['textgrid_label'])
+
+        # 2. 找到选中的Tier
+        target_tier = self.tg.getFirst(selected_tier_name)
+        if not target_tier or not isinstance(target_tier, textgrid.IntervalTier): return
+        
+        # 3. 创建新列并应用标注
+        new_column_name = target_tier.name
         label_col = pd.Series(np.nan, index=self.df.index, dtype=object)
         
-        # 简单合并所有IntervalTier的标注
-        for tier in self.tg:
-            if isinstance(tier, textgrid.IntervalTier):
-                for interval in tier:
-                    if interval.mark:
-                        # 确保 timestamp 列存在
-                        if 'timestamp' in self.df.columns:
-                            mask = (self.df['timestamp'] >= interval.minTime) & (self.df['timestamp'] < interval.maxTime)
-                            label_col.loc[mask] = interval.mark # 使用 .loc 进行基于标签的赋值
-                        else:
-                            QMessageBox.warning(self, "TextGrid匹配警告", "DataFrame中缺少 'timestamp' 列，无法匹配TextGrid标注。")
-                            break # 跳出当前tier的循环
-            if 'timestamp' not in self.df.columns: break # 如果没有timestamp，则停止所有tier的匹配
+        for interval in target_tier:
+            if interval.mark and interval.mark.strip(): 
+                if 'timestamp' in self.df.columns:
+                    mask = (self.df['timestamp'] >= interval.minTime) & (self.df['timestamp'] < interval.maxTime)
+                    label_col.loc[mask] = interval.mark
+                else:
+                    break # 如果没有timestamp列，直接跳出循环
         
-        self.df['textgrid_label'] = label_col
-        self._update_combos() # 更新组合框，以便选择新的 'textgrid_label' 列
-        self.group_by_combo.setCurrentText('textgrid_label') # 自动选中TextGrid标签作为分组
+        self.df[new_column_name] = label_col
+        
+        # 4. 更新UI，自动将分组依据设置为新创建的列
+        self._update_combos(preferred_group_col=new_column_name)
 
     def get_layer_config(self):
         """
@@ -547,6 +535,7 @@ class LayerConfigDialog(QDialog):
             "name": name,
             "data_filename": self.data_file_label.text(),
             "tg_filename": self.tg_file_label.text(),
+            "tg_tier": self.tg_tier_combo.currentText(), # [核心新增] 保存选择的Tier
             "f1_col": self.f1_combo.currentText(),
             "f2_col": self.f2_combo.currentText(),
             "group_col": self.group_by_combo.currentText(),
@@ -3507,9 +3496,9 @@ class PlotterDialog(QDialog):
     
     def load_dataframe(self, df, source_name="来自外部模块", audio_filepath=None):
         """
-        [v10.1 - 自动匹配TextGrid版]
+        [v12.0 - 顽固Bug最终修复版]
         从外部加载 DataFrame，并将其作为新的图层。
-        创建图层后，会立即尝试自动查找并关联同名的TextGrid文件。
+        修复了分组依据后备逻辑错误覆盖TextGrid自动匹配结果的Bug。
         """
         if df is None or df.empty:
             QMessageBox.warning(self, "加载失败", "传入的 DataFrame 为空或无效。")
@@ -3529,7 +3518,8 @@ class PlotterDialog(QDialog):
             "df": df,
             "data_filename": f"{source_name} (实时数据)",
             "enabled": True, "locked": False,
-            "tg": None, "tg_filename": "未关联", # 初始状态
+            "group_col": "无分组", # 预设为默认值
+            "tg": None, "tg_filename": "未关联",
             "audio_path": None, "audio_data": None, "player": None,
             "point_size": 15, "point_alpha": 0.3, "marker": "圆点", 
             "mean_enabled": False, "ellipse_enabled": False, "color_scheme": "默认", "groups": {}
@@ -3546,58 +3536,54 @@ class PlotterDialog(QDialog):
             except Exception as e:
                 print(f"[Vowel Plotter ERROR] Failed to auto-load audio for layer '{layer_name}': {e}")
         
-        # --- [核心新增] 自动查找并关联TextGrid ---
-        # 我们使用图层的最终唯一名称 (layer_name) 来进行匹配
+        # 步骤 4: 尝试通过TextGrid自动设置分组依据
         self._auto_match_textgrid_for_layer(new_layer_config)
 
-        # 4. 自动检测列名并完成配置
+        # --- [核心修复] ---
+        # 步骤 5: 只有当自动匹配未能设置分组依据时，才执行后备的猜测逻辑。
+        if not new_layer_config.get('group_col') or new_layer_config.get('group_col') == "无分组":
+            all_cols = df.columns.tolist()
+            default_group = next((c for c in all_cols if 'vowel' in c.lower() or 'label' in c.lower()), "无分组")
+            new_layer_config['group_col'] = default_group
+        # --- [修复结束] ---
+
+        # 步骤 6: 自动检测 F1 和 F2 列
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         f1_auto = next((c for c in numeric_cols if 'f1' in c.lower()), numeric_cols[0] if numeric_cols else "")
         f2_auto = next((c for c in numeric_cols if 'f2' in c.lower()), numeric_cols[1] if len(numeric_cols) > 1 else "")
         new_layer_config['f1_col'] = f1_auto
         new_layer_config['f2_col'] = f2_auto
 
-        # 如果自动关联TextGrid成功，优先使用 'textgrid_label' 作为分组依据
-        if new_layer_config['tg'] is not None and 'textgrid_label' in df.columns:
-            new_layer_config['group_col'] = 'textgrid_label'
-        else:
-            all_cols = df.columns.tolist()
-            default_group = next((c for c in all_cols if 'vowel' in c.lower() or 'label' in c.lower()), "无分组")
-            new_layer_config['group_col'] = default_group
-
-        # 5. 添加新图层并刷新UI
+        # 步骤 7: 添加新图层并刷新UI
         self.layers.append(new_layer_config)
         self._update_layer_table()
         self._plot_data()
 
     def _auto_match_textgrid_for_layer(self, layer_config, predefined_tg_path=None):
         """
-        [v10.3 - 预设路径增强版]
+        [v12.0 - Tier选择同步版]
         为一个图层自动查找、加载并应用TextGrid。
-        - 新增 predefined_tg_path 参数，如果提供，则优先加载此文件。
+        - 优先使用 predefined_tg_path (用于加载工程)。
+        - 自动选择找到的第一个IntervalTier作为默认分组依据。
         """
         import re
         import textgrid
-        import pandas as pd # 确保导入 pandas
+        import pandas as pd
 
         found_tg_path = None
-        # 1. [核心新增] 如果有预设路径且该文件存在，则优先使用它
+        # 1. 优先使用预设路径
         if predefined_tg_path and os.path.exists(predefined_tg_path):
             found_tg_path = predefined_tg_path
         else:
-            # 2. 否则，执行原有的扫描逻辑
+            # 2. 否则，在标准目录中扫描
             _, textgrids_dir = self._get_or_create_analysis_dirs()
-            if not textgrids_dir:
-                return
+            if not textgrids_dir: return
 
             layer_name = layer_config.get('name')
-            if not layer_name:
-                return
+            if not layer_name: return
             
-            # 使用正则表达式移除常见的分析后缀
             core_layer_name = re.sub(r'(_analysis.*|_slice.*)', '', layer_name, flags=re.IGNORECASE)
 
-            # 遍历标准目录查找匹配文件
             for filename in os.listdir(textgrids_dir):
                 if filename.lower().endswith('.textgrid'):
                     tg_base_name = os.path.splitext(filename)[0]
@@ -3605,38 +3591,37 @@ class PlotterDialog(QDialog):
                         found_tg_path = os.path.join(textgrids_dir, filename)
                         break
 
-        # 3. 如果找到了 TextGrid 文件 (无论是通过预设还是扫描)，则加载并应用
+        # 3. 如果找到文件，则加载并应用
         if found_tg_path:
-            print(f"[Vowel Plotter] Loading TextGrid for layer '{layer_config['name']}' from '{os.path.basename(found_tg_path)}'")
+            print(f"[Vowel Plotter] Auto-matching TextGrid for layer '{layer_config['name']}' from '{os.path.basename(found_tg_path)}'")
             try:
                 tg_object = textgrid.TextGrid.fromFile(found_tg_path)
                 df = layer_config.get('df')
 
                 if df is not None and 'timestamp' in df.columns:
-                    # 移除旧的标签列（如果存在）
-                    if 'textgrid_label' in df.columns:
-                        df.drop(columns=['textgrid_label'], inplace=True)
-
-                    # 创建新的标签列并填充
-                    label_col = pd.Series(np.nan, index=df.index, dtype=object)
-                    for tier in tg_object:
-                        if isinstance(tier, textgrid.IntervalTier):
-                            for interval in tier:
-                                if interval.mark:
-                                    mask = (df['timestamp'] >= interval.minTime) & (df['timestamp'] < interval.maxTime)
-                                    label_col.loc[mask] = interval.mark
+                    # --- [核心分层逻辑] ---
+                    first_interval_tier = next((tier for tier in tg_object if isinstance(tier, textgrid.IntervalTier)), None)
                     
-                    df['textgrid_label'] = label_col
+                    if first_interval_tier:
+                        if 'textgrid_label' in df.columns: df.drop(columns=['textgrid_label'], inplace=True)
+                        
+                        new_col_name = first_interval_tier.name
+                        label_col = pd.Series(np.nan, index=df.index, dtype=object)
+                        for interval in first_interval_tier:
+                            if interval.mark:
+                                mask = (df['timestamp'] >= interval.minTime) & (df['timestamp'] < interval.maxTime)
+                                label_col.loc[mask] = interval.mark
+                        df[new_col_name] = label_col
 
-                    # 更新图层配置
-                    layer_config['tg'] = tg_object
-                    layer_config['tg_filename'] = os.path.basename(found_tg_path)
-                    # [关键] 记录原始路径，以便下次保存工程时能找到并复制文件
-                    layer_config['original_tg_path'] = found_tg_path 
-                    # [关键] 自动将分组依据设置为新生成的标签列
-                    layer_config['group_col'] = 'textgrid_label'
+                        # 更新传入的配置字典
+                        layer_config['tg'] = tg_object
+                        layer_config['tg_filename'] = os.path.basename(found_tg_path)
+                        layer_config['original_tg_path'] = found_tg_path 
+                        layer_config['tg_tier'] = new_col_name # 保存使用的Tier
+                        layer_config['group_col'] = new_col_name # 自动设为分组依据
+                    # --- [逻辑结束] ---
                 else:
-                    print(f"[Vowel Plotter WARNING] Layer '{layer_config['name']}' has a matching TextGrid, but its DataFrame is missing a 'timestamp' column. Skipping association.")
+                    print(f"[Vowel Plotter WARNING] Layer '{layer_config['name']}' has a matching TextGrid, but its DataFrame is missing a 'timestamp' column.")
 
             except Exception as e:
                 print(f"[Vowel Plotter ERROR] Failed to load or apply TextGrid '{found_tg_path}': {e}")

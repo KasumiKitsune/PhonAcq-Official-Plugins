@@ -98,6 +98,7 @@ class QuickRecordDialog(QDialog):
         
         self.main_window = parent_window
         self.icon_manager = parent_window.icon_manager
+        self.resolve_device_func = self.main_window.settings_page.resolve_device_func
         
         # --- 状态变量 ---
         self.is_recording = False
@@ -190,6 +191,12 @@ class QuickRecordDialog(QDialog):
 
         self.status_label = QLabel("准备就绪")
         self.status_label.setAlignment(Qt.AlignCenter)
+        # [新增] 用于显示当前录音设备的标签
+        self.device_label = QLabel("设备: 未指定")
+        self.device_label.setAlignment(Qt.AlignCenter)
+        self.device_label.setObjectName("SubtleStatusLabel") # 使用一个不显眼的样式
+        self.device_label.setWordWrap(True) # <-- [新增] 允许标签文本换行
+        self.device_label.setToolTip("当前用于录音的音频设备。\n该设置可在'系统与帮助 -> 程序设置'中更改。")
         self.volume_meter = QProgressBar()
         self.volume_meter.setRange(0, 100)
         self.volume_meter.setValue(0)
@@ -198,6 +205,7 @@ class QuickRecordDialog(QDialog):
 
         record_layout.addWidget(self.record_btn)
         record_layout.addWidget(self.status_label)
+        record_layout.addWidget(self.device_label) # [新增] 将设备标签添加到布局中
         record_layout.addWidget(self.volume_meter)
         right_layout.addWidget(record_group)
 
@@ -272,6 +280,24 @@ class QuickRecordDialog(QDialog):
         # [新增功能] 连接音量计定时器
         self.update_timer.timeout.connect(self.update_volume_meter)
 
+    def _get_device_name(self, device_index):
+        """根据设备索引号查询并返回设备名称。"""
+        try:
+            if device_index is None:
+                # 如果索引是None，表示使用系统默认输入设备
+                default_device_info = sd.query_devices(kind='input')
+                return default_device_info.get('name', "系统默认")
+            
+            devices = sd.query_devices()
+            if 0 <= device_index < len(devices):
+                return devices[device_index]['name']
+            else:
+                return f"无效索引 ({device_index})"
+        except Exception as e:
+            # 在某些系统或没有声卡驱动时，查询可能失败
+            print(f"查询设备名称失败: {e}", file=sys.stderr)
+            return "查询失败"
+
     def _update_icons(self):
         """
         设置或更新所有按钮的图标。
@@ -306,6 +332,11 @@ class QuickRecordDialog(QDialog):
         从主程序配置中获取采样率和通道数，并启动 sounddevice 输入流。
         """
         try:
+            # [核心修改] 使用从主程序获取的函数来解析最终的录音设备
+            device_index = self.resolve_device_func(self.main_window.config)
+            device_name = self._get_device_name(device_index)
+            self.device_label.setText(f"设备: {device_name}")
+
             # 从主程序配置中获取音频设置
             sr = self.main_window.config.get("audio_settings", {}).get("sample_rate", 44100)
             channels = self.main_window.config.get("audio_settings", {}).get("channels", 1)
@@ -315,21 +346,26 @@ class QuickRecordDialog(QDialog):
             while not self.volume_meter_queue.empty(): self.volume_meter_queue.get_nowait()
             self.volume_history.clear()
 
-            # 创建并启动 sounddevice 输入流
-            self.stream = sd.InputStream(samplerate=sr, channels=channels, callback=self._audio_callback)
+            # [核心修改] 在创建流时传入解析出的设备索引
+            self.stream = sd.InputStream(
+                device=device_index,
+                samplerate=sr,
+                channels=channels,
+                callback=self._audio_callback
+            )
             self.stream.start()
             
             self.is_recording = True
             self.status_label.setText("录制中...")
             self.record_btn.setText("停止录制")
-            self.record_btn.setIcon(self.icon_manager.get_icon("stop")) # 将录制按钮图标设为停止
+            self.record_btn.setIcon(self.icon_manager.get_icon("stop"))
             
-            # [新增功能] 启动音量计定时器，周期性更新UI
-            self.update_timer.start(30) # 每30毫秒更新一次音量计
+            self.update_timer.start(30)
         
         except Exception as e:
             QMessageBox.critical(self, "录制错误", f"无法开始录制:\n{e}")
             self.is_recording = False
+            self.device_label.setText("设备: 初始化失败")
 
     def stop_recording(self):
         """
@@ -382,7 +418,7 @@ class QuickRecordDialog(QDialog):
         new_item_data = {
             'type': 'item', # 类型为“item”，表示普通条目
             'text': clip_name, # 显示在列表中的文本
-            'icon': self.icon_manager.get_icon("audio"), # 给它一个音频图标
+            'icon': self.icon_manager.get_icon("music_record"), # 给它一个音频图标
             'data': {'path': temp_filepath, 'name': clip_name} # 存储核心数据
         }
         self.clip_list.appendItemWithAnimation(new_item_data)
@@ -393,6 +429,7 @@ class QuickRecordDialog(QDialog):
         
         # 恢复UI状态
         self.status_label.setText("准备就绪")
+        self.device_label.setText("设备: 未指定") # [新增] 重置设备标签
         self.record_btn.setText("开始录制")
         self.record_btn.setIcon(self.icon_manager.get_icon("record"))
 

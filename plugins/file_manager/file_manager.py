@@ -9,7 +9,6 @@ import pathlib
 from datetime import datetime, timedelta
 import subprocess
 import uuid
-
 # PyQt5 核心模块导入
 from PyQt5.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem,
@@ -597,6 +596,22 @@ class FileManagerDialog(QDialog):
         self.file_view.installEventFilter(self.key_filter)
         self._connect_signals() # 连接所有UI信号
         self._populate_nav_tree() # 填充左侧导航树
+        self._apply_interaction_mode()
+
+    def _apply_interaction_mode(self):
+        """
+        [新增] 读取配置并设置导航树的展开行为。
+        """
+        try:
+            with open(os.path.join(self.plugin_dir, 'config.json'), 'r') as f:
+                config = json.load(f)
+            expand_action = config.get("expand_action", "double_click")
+        except (FileNotFoundError, json.JSONDecodeError):
+            expand_action = "double_click" # 默认行为
+
+        # QTreeWidget.setExpandsOnDoubleClick(True) 意味着需要双击才能展开
+        # 这对应我们的 "double_click" 模式
+        self.nav_tree.setExpandsOnDoubleClick(expand_action == "double_click")
 
     def _load_icons(self):
         """
@@ -651,64 +666,68 @@ class FileManagerDialog(QDialog):
     def _init_ui(self):
         """构建对话框的用户界面布局。"""
         layout = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Horizontal) # 创建水平分割器
+        splitter = QSplitter(Qt.Horizontal)
 
         # --- 左侧面板：导航树 (QTreeWidget) ---
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.addWidget(QLabel("项目目录:"))
         self.nav_tree = QTreeWidget()
-        self.nav_tree.setHeaderHidden(True) # 隐藏表头，只显示项目名称
+        self.nav_tree.setHeaderHidden(True)
         left_layout.addWidget(self.nav_tree)
         
         # --- 右侧面板：文件视图 (QTableWidget) ---
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
-        # [修改] 创建包含“返回上一级”按钮和路径标签的水平布局
+        # [核心修改] 创建包含“返回”、路径标签和“设置”按钮的水平布局
         path_bar_layout = QHBoxLayout()
         path_bar_layout.setContentsMargins(0, 0, 0, 0)
         path_bar_layout.setSpacing(5)
 
+        # 创建控件 (顺序不变)
+        self.settings_button = QPushButton("设置")
+        self.settings_button.setIcon(self.icon_manager.get_icon("settings"))
+        self.settings_button.setToolTip("打开文件管理器设置")
+        self.settings_button.setObjectName("PathBarButton")
+
         self.up_button = QPushButton()
         self.up_button.setIcon(self.icon_manager.get_icon("return"))
         self.up_button.setToolTip("返回上一级 (Backspace)")
-        self.up_button.setObjectName("PathBarButton") # 用于QSS样式化
+        self.up_button.setObjectName("PathBarButton")
 
-        self.current_path_label = QLabel("请选择一个目录") # 显示当前路径
-        self.current_path_label.setObjectName("BreadcrumbLabel") # 用于QSS样式
+        self.current_path_label = QLabel("请选择一个目录")
+        self.current_path_label.setObjectName("BreadcrumbLabel")
 
-        path_bar_layout.addWidget(self.up_button)
-        path_bar_layout.addWidget(self.current_path_label)
-        path_bar_layout.addStretch() # 将标签推向左侧
+        # [核心修改] 调整控件添加到布局的顺序
+        path_bar_layout.addWidget(self.up_button)         # 1. “返回”按钮
+        path_bar_layout.addWidget(self.current_path_label) # 2. 路径标签
+        path_bar_layout.addStretch()                       # 3. 伸缩弹簧，将设置按钮推到最右
+        path_bar_layout.addWidget(self.settings_button)    # 4. “设置”按钮
 
-        right_layout.addLayout(path_bar_layout) # 将新的水平布局添加到右侧面板
+        right_layout.addLayout(path_bar_layout)
         
-        # 搜索栏
         search_layout = QHBoxLayout()
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("在此处搜索当前目录中的文件...")
-        self.search_bar.setClearButtonEnabled(True) # 添加清除按钮
+        self.search_bar.setClearButtonEnabled(True)
         search_layout.addWidget(QLabel("搜索:"))
         search_layout.addWidget(self.search_bar)
-        
-        right_layout.addLayout(search_layout) # 添加搜索栏
-        
+        right_layout.addLayout(search_layout)
         self.file_view = QTableWidget()
         self.file_view.setColumnCount(3)
         self.file_view.setHorizontalHeaderLabels(["名称", "大小", "修改日期"])
-        self.file_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch) # 名称列拉伸
-        self.file_view.setSelectionBehavior(QTableWidget.SelectRows) # 每次选中整行
-        self.file_view.setEditTriggers(QTableWidget.NoEditTriggers) # 禁止直接编辑，重命名通过右键菜单
-        self.file_view.setShowGrid(False) # 隐藏网格线
-        self.file_view.verticalHeader().setVisible(False) # 隐藏垂直表头（行号）
+        self.file_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.file_view.setSelectionBehavior(QTableWidget.SelectRows)
+        self.file_view.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.file_view.setShowGrid(False)
+        self.file_view.verticalHeader().setVisible(False)
         right_layout.addWidget(self.file_view)
 
-        # 将左右面板添加到分割器
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([280, 620]) # 设置初始分割比例
-        layout.addWidget(splitter) # 将分割器添加到主布局
+        splitter.setSizes([280, 620])
+        layout.addWidget(splitter)
 
     def _go_to_parent_directory(self):
         """
@@ -749,56 +768,58 @@ class FileManagerDialog(QDialog):
         QShortcut(QKeySequence.Copy, self, self._copy_items_from_selection)
         QShortcut(QKeySequence.Cut, self, self._cut_items_from_selection)
         QShortcut(QKeySequence.Paste, self, self._paste_items)
+        self.settings_button.clicked.connect(self._open_settings_dialog)
         # [新增] 连接“返回上一级”按钮的点击事件
         self.up_button.clicked.connect(self._go_to_parent_directory)
 
         # [新增] 添加 Backspace 快捷键
         QShortcut(QKeySequence.Backspace, self, self._go_to_parent_directory)
 
+    def _open_settings_dialog(self):
+        """
+        [v1.1 修改] 打开设置对话框，并将 icon_manager 实例传递进去。
+        """
+        # [核心修改] 将 self.icon_manager 作为参数传入
+        dialog = FileManagerSettingsDialog(self, self.icon_manager) 
+        if dialog.exec_() == QDialog.Accepted:
+            self._populate_nav_tree()
+            self._apply_interaction_mode()
+
     def _populate_nav_tree(self):
         """
-        动态扫描并构建左侧导航树的完整目录结构。
-        它会递归地添加所有子文件夹，并应用名称汉化、专属图标和优先级排序。
+        [v1.1 - 简易模式版]
+        动态扫描并构建左侧导航树。
+        如果启用了简易模式，则只显示用户核心数据文件夹。
         """
-        self.nav_tree.clear() # 清空现有树
+        self.nav_tree.clear()
         
-        # 优先级排序：数字越小，越靠前
-        dir_priorities = {
-            # 首要用户数据区
-            "Results": 10,
-            "word_lists": 11,
-            "dialect_visual_wordlists": 12,
-            "flashcards": 13,
-            "PhonAcq_Archives": 14,
-            # 次要/缓存数据区
-            "audio_record": 20,
-            "audio_tts": 21,
-            # 用户配置与扩展区
-            "config": 30,
-            "themes": 31,
-            "plugins": 32,
-            # 程序核心/静态资源区
-            "modules": 90,
-            "assets": 91,
+        # --- [核心修改 1/2] 加载配置并确定要显示的文件夹列表 ---
+        try:
+            with open(os.path.join(self.plugin_dir, 'config.json'), 'r') as f:
+                config = json.load(f)
+            is_simple_mode = config.get("simple_mode_enabled", False)
+        except (FileNotFoundError, json.JSONDecodeError):
+            is_simple_mode = False
+
+        # 定义简易模式下要显示的文件夹
+        simple_mode_dirs = {
+            "Results", "word_lists", "dialect_visual_wordlists", 
+            "flashcards", "PhonAcq_Archives", "audio_record", "audio_tts"
         }
 
-        # 中文别名：使用更具描述性、长短不一的名称
-        dir_aliases = {
-            "assets": "静态资源",
-            "audio_record": "用户提示音库",
-            "audio_tts": "TTS提示音",
-            "config": "程序配置",
-            "dialect_visual_wordlists": "图文词表",
-            "flashcards": "速记卡管理",
-            "modules": "核心模块",
-            "PhonAcq_Archives": "项目档案库",
-            "plugins": "扩展插件",
-            "Results": "采集结果",
-            "themes": "主题皮肤",
-            "word_lists": "标准词表",
+        # ... (后续的优先级、别名、提示等字典保持不变) ...
+        dir_priorities = {
+            "Results": 10, "word_lists": 11, "dialect_visual_wordlists": 12,
+            "flashcards": 13, "PhonAcq_Archives": 14, "audio_record": 20,
+            "audio_tts": 21, "config": 30, "themes": 31, "plugins": 32,
+            "modules": 90, "assets": 91,
         }
-        
-        # 工具提示：为每个目录提供详细说明
+        dir_aliases = {
+            "assets": "静态资源", "audio_record": "用户提示音库", "audio_tts": "TTS提示音",
+            "config": "程序配置", "dialect_visual_wordlists": "图文词表",
+            "flashcards": "速记卡管理", "modules": "核心模块", "PhonAcq_Archives": "项目档案库",
+            "plugins": "扩展插件", "Results": "采集结果", "themes": "主题皮肤", "word_lists": "标准词表",
+        }
         dir_tooltips = {
             "Results": "所有采集任务（标准朗读、看图说话等）的音频和日志文件默认保存在这里。",
             "word_lists": "存放所有标准朗读任务使用的 .json 词表文件。",
@@ -813,48 +834,53 @@ class FileManagerDialog(QDialog):
             "modules": "存放程序的核心功能模块 .py 文件。",
             "assets": "存放程序的通用静态资源，如默认图标、帮助文档等。",
         }
-
-        # 定义需要排除的顶级文件夹（开发/构建/临时文件等）
         exclude_dirs = {'.git', '.idea', '.vscode', '__pycache__', 'build', 'dist', '.trash'}
         
         try:
-            # 获取项目根目录下的所有文件夹
             all_root_dirs = (d for d in os.listdir(BASE_PATH) if os.path.isdir(os.path.join(BASE_PATH, d)))
-            # 过滤掉排除项，并根据优先级和别名进行排序
-            sorted_dirs = sorted(
-                (d for d in all_root_dirs if d not in exclude_dirs),
-                key=lambda d: (dir_priorities.get(d, 99), dir_aliases.get(d, d)) # 未定义优先级的排在最后
-            )
+            
+            # --- [核心修改 2/2] 根据模式进行过滤 ---
+            dirs_to_show = []
+            for d in all_root_dirs:
+                if d not in exclude_dirs:
+                    if is_simple_mode and d not in simple_mode_dirs:
+                        continue # 在简易模式下，如果文件夹不在白名单中，则跳过
+                    dirs_to_show.append(d)
 
-            # 遍历并添加顶级文件夹到树中
+            sorted_dirs = sorted(
+                dirs_to_show,
+                key=lambda d: (dir_priorities.get(d, 99), dir_aliases.get(d, d))
+            )
+            
+            # ... (后续的遍历、添加item和回收站的逻辑保持不变) ...
             for name in sorted_dirs:
                 full_path = os.path.join(BASE_PATH, name)
-                display_name = dir_aliases.get(name, name) # 获取中文显示名
-                
+                display_name = dir_aliases.get(name, name)
                 item = QTreeWidgetItem(self.nav_tree, [display_name])
-                item.setIcon(0, self.dir_icons.get(name, self.icons.get("folder"))) # 使用目录专属图标或通用图标
-                item.setData(0, Qt.UserRole, full_path) # 将完整路径存储在UserData中
-                
-                # 设置工具提示
+                item.setIcon(0, self.dir_icons.get(name, self.icons.get("folder")))
+                item.setData(0, Qt.UserRole, full_path)
                 tooltip = dir_tooltips.get(name)
-                if tooltip:
-                    item.setToolTip(0, tooltip)
-
-                # 递归添加子文件夹
+                if tooltip: item.setToolTip(0, tooltip)
                 self._add_subfolders_recursively(item, full_path)
         
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法扫描项目根目录: {e}")
         
-        # 单独添加回收站条目
         trash_item = QTreeWidgetItem(self.nav_tree, ["回收站 (.trash)"])
         trash_item.setIcon(0, self.icons.get("trash"))
         trash_item.setData(0, Qt.UserRole, self.trash_path)
         trash_item.setData(0, Qt.UserRole + 1, "trash_item")
         trash_item.setToolTip(0, "所有被删除的文件和文件夹都会临时存放在这里。")
         
-        # 优化默认选中和展开行为
-        if self.nav_tree.topLevelItemCount() > 0:
+        # [核心修改] 根据配置决定是否自动展开和选中
+        try:
+            with open(os.path.join(self.plugin_dir, 'config.json'), 'r') as f:
+                config = json.load(f)
+            auto_expand = config.get("auto_expand_first_item", True)
+        except (FileNotFoundError, json.JSONDecodeError):
+            auto_expand = True # 如果配置不存在，保持默认行为
+
+        if auto_expand and self.nav_tree.topLevelItemCount() > 0:
             # 默认选中并展开“采集结果”文件夹（如果存在）
             results_item = self.nav_tree.findItems("采集结果", Qt.MatchExactly, 0)
             if results_item:
@@ -863,7 +889,7 @@ class FileManagerDialog(QDialog):
             else:
                 # 否则，选中并展开第一个顶级文件夹
                 first_item = self.nav_tree.topLevelItem(0)
-                if first_item: # 再次检查以防列表为空
+                if first_item:
                     first_item.setExpanded(True)
                     self.nav_tree.setCurrentItem(first_item)
 
@@ -933,13 +959,23 @@ class FileManagerDialog(QDialog):
 
     def _on_nav_item_selected(self, current, previous):
         """
-        当用户在左侧导航树中选择一个不同的文件夹时，刷新右侧文件视图。
+        当用户在左侧导航树中选择一个不同的文件夹时调用。
+        根据配置，此方法可能还会触发文件夹的展开/折叠。
         """
-        if current:
-            # 获取选中文件夹的完整路径
-            path = current.data(0, Qt.UserRole)
-            self._populate_file_view(path)
-            self.search_bar.clear() # 切换目录时清空搜索框
+        if not current:
+            return
+
+        # --- [核心修改] 根据配置执行不同操作 ---
+        # 如果是“单击展开”模式，则单击会切换展开状态
+        if not self.nav_tree.expandsOnDoubleClick():
+            # 只有当点击的是一个有子项的文件夹时，才切换展开状态
+            if current.childCount() > 0:
+                current.setExpanded(not current.isExpanded())
+
+        # --- 无论何种模式，单击都会刷新右侧文件视图 ---
+        path = current.data(0, Qt.UserRole)
+        self._populate_file_view(path)
+        self.search_bar.clear()
 
     def _populate_file_view(self, dir_path):
         """
@@ -2477,3 +2513,147 @@ class FileManagerDialog(QDialog):
 
         # 强制将导航树的选中项恢复到操作前的位置，确保UI焦点不变
         self._sync_nav_tree_to_path(current_selected_path_before_drop)
+
+import os
+import json
+import sys
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox, 
+                             QCheckBox, QGroupBox, QLabel, QHBoxLayout, QComboBox)
+from PyQt5.QtCore import Qt
+try:
+    from modules.custom_widgets_module import ToggleSwitch
+except ImportError:
+    # 如果直接导入失败，尝试添加主项目的 modules 目录到路径中
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'modules')))
+    from custom_widgets_module import ToggleSwitch
+
+class FileManagerSettingsDialog(QDialog):
+    """
+    文件管理器插件的专属设置对话框。
+    负责UI的构建、设置的加载与保存。
+    """
+    def __init__(self, parent=None, icon_manager=None):
+        super().__init__(parent)
+        
+        # [核心修改 2/3] 保存 icon_manager 引用
+        self.icon_manager = icon_manager
+        
+        self.plugin_dir = os.path.dirname(__file__)
+        self.config_path = os.path.join(self.plugin_dir, 'config.json')
+        self.setWindowTitle("文件管理器设置")
+        self.setMinimumWidth(400)
+        self._init_ui()
+        self._connect_signals()
+        self.load_settings()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+
+        view_group = QGroupBox("视图与交互设置")
+        group_v_layout = QVBoxLayout(view_group)
+        group_v_layout.setSpacing(15)
+
+        # --- 第一行: 简易模式 ---
+        simple_mode_layout = QHBoxLayout()
+        simple_mode_label = QLabel("启用简易模式:")
+        self.simple_mode_switch = ToggleSwitch(self)
+        self.simple_mode_switch.setToolTip(
+            "启用后，左侧目录树将只显示最常用的用户数据文件夹。"
+        )
+        simple_mode_layout.addWidget(simple_mode_label)
+        simple_mode_layout.addStretch()
+        simple_mode_layout.addWidget(self.simple_mode_switch)
+        
+        # --- 第二行: 自动展开 ---
+        auto_expand_layout = QHBoxLayout()
+        auto_expand_label = QLabel("自动展开第一项:")
+        self.auto_expand_switch = ToggleSwitch(self)
+        self.auto_expand_switch.setToolTip(
+            "启用后，每次打开时将自动展开并选中第一个目录。"
+        )
+        auto_expand_layout.addWidget(auto_expand_label)
+        auto_expand_layout.addStretch()
+        auto_expand_layout.addWidget(self.auto_expand_switch)
+        
+        # --- 第三行: 展开目录方式 (核心修改) ---
+        expand_action_layout = QHBoxLayout()
+        expand_action_label = QLabel("展开目录方式:")
+        self.expand_action_combo = QComboBox()
+
+        # [核心修改 3/3] 使用传入的 icon_manager 从插件自己的目录加载图标
+        if self.icon_manager:
+            plugin_icon_dir = os.path.join(self.plugin_dir, 'icons')
+            
+            # 使用 get_icon_from_path 来加载指定路径的图标
+            # IconManager 会自动处理缓存和着色
+            icon_double_click = self.icon_manager.get_icon_from_path(os.path.join(plugin_icon_dir, 'double_click.png'))
+            icon_single_click = self.icon_manager.get_icon_from_path(os.path.join(plugin_icon_dir, 'single_click.png'))
+
+            self.expand_action_combo.addItem(icon_double_click, "双击", "double_click")
+            self.expand_action_combo.addItem(icon_single_click, "单击", "single_click")
+        else:
+            # 如果没有 icon_manager (后备方案)
+            self.expand_action_combo.addItem("双击", "double_click")
+            self.expand_action_combo.addItem("单击", "single_click")
+
+        self.expand_action_combo.setMinimumWidth(120) 
+        self.expand_action_combo.setToolTip("选择在左侧目录树中单击或双击来展开/折叠文件夹。")
+        
+        expand_action_layout.addWidget(expand_action_label)
+        expand_action_layout.addStretch()
+        expand_action_layout.addWidget(self.expand_action_combo)
+
+        # 将所有行添加到垂直布局中
+        group_v_layout.addLayout(simple_mode_layout)
+        group_v_layout.addLayout(auto_expand_layout)
+        group_v_layout.addLayout(expand_action_layout)
+
+        main_layout.addWidget(view_group)
+        
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        main_layout.addWidget(self.button_box)
+
+        simple_mode_label.mousePressEvent = lambda event: self.simple_mode_switch.toggle()
+        auto_expand_label.mousePressEvent = lambda event: self.auto_expand_switch.toggle()
+        expand_action_label.mousePressEvent = lambda event: self.expand_action_combo.setFocus()
+
+    def _connect_signals(self):
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+    
+    def load_settings(self):
+        config = self._load_config_file()
+        self.simple_mode_switch.setChecked(config.get("simple_mode_enabled", False))
+        self.auto_expand_switch.setChecked(config.get("auto_expand_first_item", True))
+        
+        # [核心新增] 加载新设置项，默认为 "double_click"
+        expand_action = config.get("expand_action", "double_click")
+        index = self.expand_action_combo.findData(expand_action)
+        if index != -1:
+            self.expand_action_combo.setCurrentIndex(index)
+
+    def save_settings(self):
+        config = self._load_config_file()
+        config["simple_mode_enabled"] = self.simple_mode_switch.isChecked()
+        config["auto_expand_first_item"] = self.auto_expand_switch.isChecked()
+        # [核心新增] 保存新设置项
+        config["expand_action"] = self.expand_action_combo.currentData()
+        self._save_config_file(config)
+        
+    def _load_config_file(self):
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_config_file(self, config_data):
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=4, ensure_ascii=False)
+        except IOError as e:
+            print(f"[File Manager Settings] 无法保存配置文件: {e}")
+            
+    def accept(self):
+        self.save_settings()
+        super().accept()
