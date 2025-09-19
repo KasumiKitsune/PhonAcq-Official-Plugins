@@ -8,7 +8,7 @@ import html
 from PyQt5.QtWidgets import (QAction, QFileDialog, QMessageBox, QDialog, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton,
                              QListWidget, QListWidgetItem, QGroupBox, QSplitter, QInputDialog,
-                             QWidget, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QCheckBox, QFrame)
+                             QWidget, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QCheckBox, QFrame, QApplication)
 from PyQt5.QtGui import QIcon, QFont, QColor, QPalette, QPixmap, QKeySequence
 from PyQt5.QtCore import Qt, QSize, QEvent, pyqtSignal, QTimer
 
@@ -136,12 +136,13 @@ class ImmersiveWidget(QDialog):
         layout.addLayout(top_layout)
         layout.addLayout(bottom_layout)
         
-        # --- 信号连接 ---
         self.add_button.clicked.connect(self.main_workbench._add_annotation)
         self.exit_toggle.toggled.connect(self._on_exit_toggled)
-        self.annotation_text.returnPressed.connect(self.main_workbench._add_annotation)
         
-        # [新增] 连接分组选择器的信号
+        # [核心修改] 将 immersive widget 的 returnPressed 信号也连接到主工作台的智能处理函数
+        # 这样它就会自动获得 Ctrl+Enter 添加 / Enter 播放 的功能
+        self.annotation_text.returnPressed.connect(self.main_workbench._handle_return_pressed)
+        
         self.group_selector.currentTextChanged.connect(
             self.main_workbench._set_active_group_from_immersive
         )
@@ -169,7 +170,7 @@ class ImmersiveWidget(QDialog):
 # 标注工作台对话框 (AnnotationWorkbenchDialog) v3.4
 # ==============================================================================
 class AnnotationWorkbenchDialog(QDialog):
-    def __init__(self, audio_filepath, total_duration, sr, icon_manager, parent=None):
+    def __init__(self, audio_filepath, total_duration, sr, icon_manager, audio_analysis_page, parent=None):
         super().__init__(parent)
         self.setWindowTitle("TextGrid 标注工作台")
         self.setMinimumSize(600, 700)
@@ -179,6 +180,8 @@ class AnnotationWorkbenchDialog(QDialog):
         self.total_duration = total_duration
         self.sr = sr
         self.icon_manager = icon_manager
+        # [新增] 保存对主分析页面的引用
+        self.audio_analysis_page = audio_analysis_page
         
         # --- 中心化状态管理 ---
         self.current_selection = None
@@ -198,6 +201,21 @@ class AnnotationWorkbenchDialog(QDialog):
         self.annotation_list.addAction(self.delete_action)
 
         self._update_ui_state()
+        
+    def _connect_signals(self):
+        """连接所有UI控件的信号到相应的槽函数。"""
+        self.add_group_btn.clicked.connect(self._add_group)
+        self.remove_group_btn.clicked.connect(self._remove_group)
+        self.group_list.currentItemChanged.connect(self._on_group_selected)
+        self.add_annotation_btn.clicked.connect(self._add_annotation)
+        
+        # [修改] 将 returnPressed 连接到新的智能处理函数
+        self.annotation_text.returnPressed.connect(self._handle_return_pressed)
+        
+        self.annotation_list.itemDoubleClicked.connect(self._edit_annotation)
+        self.import_button.clicked.connect(self._import_textgrid)
+        self.export_button.clicked.connect(self._export_textgrid)
+        self.immersive_toggle.toggled.connect(self._toggle_immersive_mode)
         
     def _init_ui(self):
         """构建标注工作台的用户界面。"""
@@ -382,17 +400,6 @@ class AnnotationWorkbenchDialog(QDialog):
         layout.addWidget(box)
         return panel
 
-    def _connect_signals(self):
-        """连接所有UI控件的信号到相应的槽函数。"""
-        self.add_group_btn.clicked.connect(self._add_group)
-        self.remove_group_btn.clicked.connect(self._remove_group)
-        self.group_list.currentItemChanged.connect(self._on_group_selected)
-        self.add_annotation_btn.clicked.connect(self._add_annotation)
-        self.annotation_text.returnPressed.connect(self._add_annotation)
-        self.annotation_list.itemDoubleClicked.connect(self._edit_annotation)
-        self.import_button.clicked.connect(self._import_textgrid)
-        self.export_button.clicked.connect(self._export_textgrid)
-        self.immersive_toggle.toggled.connect(self._toggle_immersive_mode)
 
     def _delete_selected_annotations(self):
         """删除在标注列表中所有被选中的项。"""
@@ -408,6 +415,22 @@ class AnnotationWorkbenchDialog(QDialog):
         self._update_ui_state()
         self.annotation_text.setFocus()
         self.annotation_text.selectAll()
+
+    def _handle_return_pressed(self):
+        """
+        [新增] 智能处理回车键事件。
+        - Ctrl + Enter: 添加标注
+        - Enter: 播放当前选区
+        """
+        modifiers = QApplication.keyboardModifiers()
+        
+        if modifiers == Qt.ControlModifier:
+            # 如果按下了Ctrl键，则执行添加标注的逻辑
+            self._add_annotation()
+        else:
+            # 如果只按了回车键，则调用主分析页面的播放功能
+            if self.audio_analysis_page:
+                self.audio_analysis_page.toggle_playback()
 
     def _update_ui_state(self):
         """根据当前状态更新UI控件的可用性。"""
@@ -844,7 +867,10 @@ class PraatExporterPlugin(BasePlugin):
         return action
 
     def execute(self, **kwargs):
-        """插件执行入口点。打开或激活标注工作台。"""
+        """
+        [已优化] 插件执行入口点。打开或激活标注工作台。
+        此版本将 audio_analysis_page 的引用传递给对话框。
+        """
         if not self.audio_analysis_page or self.audio_analysis_page.audio_data is None:
             QMessageBox.warning(self.main_window, "无法操作", "请先在“音频分析”页面加载一个音频文件。")
             return
@@ -857,6 +883,8 @@ class PraatExporterPlugin(BasePlugin):
                 total_duration=len(self.audio_analysis_page.audio_data) / self.audio_analysis_page.sr,
                 sr=self.audio_analysis_page.sr,
                 icon_manager=self.main_window.icon_manager,
+                # [新增] 传递主分析页面的引用
+                audio_analysis_page=self.audio_analysis_page,
                 parent=self.main_window
             )
             self.workbench_dialog.finished.connect(self._on_workbench_closed)
