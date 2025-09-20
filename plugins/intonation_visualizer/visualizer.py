@@ -194,6 +194,7 @@ class LayerConfigDialog(QDialog):
         super().__init__(parent)
         self.df = None
         self.tg = None
+        self.original_filepath = None
         
         # --- [核心修复] 移除 deepcopy，采用浅复制和手动数据恢复 ---
         self.config = existing_config.copy() if existing_config else {}
@@ -368,41 +369,94 @@ class LayerConfigDialog(QDialog):
             self.f0_combo.setCurrentText(self.config.get('f0_col'))
 
     def _load_data(self):
-        """加载数据文件（Excel或CSV）到DataFrame。"""
-        path, _ = QFileDialog.getOpenFileName(self, "选择F0数据文件", "", "表格文件 (*.xlsx *.xls *.csv)")
+        """
+        加载数据文件（Excel、CSV或Praat .txt）到DataFrame。
+        [已修改] 增加了对 Praat .txt 格式的支持，并记录原始文件路径。
+        """
+        path, _ = QFileDialog.getOpenFileName(self, "选择F0数据文件", "", "表格文件 (*.xlsx *.xls *.csv *.txt)")
         if not path: return
+        
         try:
-            df = pd.read_excel(path) if path.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(path)
+            df = None
+            if path.lower().endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(path)
+            elif path.lower().endswith('.csv'):
+                df = pd.read_csv(path)
+            else: # 默认为 Praat .txt 格式
+                temp_df = pd.read_csv(path, delim_whitespace=True, na_values='--undefined--')
+
+                f0_col_praat = next((c for c in temp_df.columns if 'f0' in c.lower() or 'frequency' in c.lower()), None)
+                if f0_col_praat:
+                    temp_df.dropna(subset=[f0_col_praat], inplace=True)
+                
+                rename_mapping = {}
+                for col in temp_df.columns:
+                    if 'time' in col.lower():
+                        rename_mapping[col] = 'timestamp'
+                    elif 'f0' in col.lower() or 'frequency' in col.lower():
+                        rename_mapping[col] = 'f0_hz'
+                temp_df.rename(columns=rename_mapping, inplace=True)
+                
+                temp_df.reset_index(drop=True, inplace=True)
+
+                if 'timestamp' not in temp_df.columns or 'f0_hz' not in temp_df.columns:
+                    QMessageBox.warning(self, "列名不匹配", "无法在文件中找到标准的时间和F0列。\n请确保列名包含 'Time' 和 'F0' 或 'Frequency'。")
+                    return
+                df = temp_df
+
             self.df = df
+            self.original_filepath = path  # [新增] 记录加载文件的完整路径
             self.data_file_label.setText(os.path.basename(path))
             self.config['data_filename'] = os.path.basename(path)
             
-            if not self.name_edit.text():
-                self.name_edit.setText(os.path.splitext(os.path.basename(path))[0])
-            
-            # --- [核心修复开始] ---
-            # 清除后台TextGrid数据
-            self.tg = None
-            self.tg_file_label.setText("未选择 (可选)")
-            self.config.pop('tg_filename', None)
-            self.config.pop('original_tg_path', None)
-            
-            # 隐藏并清空Tier选择UI，确保界面状态同步
-            self.tg_tier_label.hide()
-            self.tg_tier_combo.hide()
-            self.tg_tier_combo.clear()
-            # --- [核心修复结束] ---
+            # --- [核心修改开始] ---
+            # 只有当加载的文件名不是 info.txt 时，才清空 TextGrid 和音频
+            # 并且只有当文件名是'info.txt'时，才不清空用户可能已输入的名称
+            if os.path.basename(path).lower() != 'info.txt':
+                if not self.name_edit.text():
+                    self.name_edit.setText(os.path.splitext(os.path.basename(path))[0])
+                
+                # 清理旧的TextGrid数据
+                self.tg = None
+                self.tg_file_label.setText("未选择 (可选)")
+                self.config.pop('tg_filename', None)
+                self.config.pop('original_tg_path', None)
+                
+                # 隐藏并清空Tier选择UI
+                self.tg_tier_label.hide()
+                self.tg_tier_combo.hide()
+                self.tg_tier_combo.clear()
+            else:
+                 # 如果是 info.txt，我们只更新数据，不清空其他设置
+                 # 也不自动修改图层名称
+                 pass
+            # --- [核心修改结束] ---
 
             self._update_combos()
         except Exception as e:
-            QMessageBox.critical(self, "加载失败", f"无法读取数据文件: {e}"); self.df = None
+            QMessageBox.critical(self, "加载失败", f"无法读取数据文件: {e}")
+            self.df = None
+            self.original_filepath = None # [新增] 加载失败时清空路径
 
     def _load_textgrid(self):
         """加载 TextGrid 文件并将其标签应用到 DataFrame。"""
         if self.df is None or 'timestamp' not in self.df.columns:
             QMessageBox.warning(self, "需要时间戳", "请先加载一个包含 'timestamp' 列的数据文件。")
             return
-        path, _ = QFileDialog.getOpenFileName(self, "选择 TextGrid 文件", "", "TextGrid 文件 (*.TextGrid)")
+        
+        # --- [核心修改开始] ---
+        # 1. 获取推荐的默认目录
+        default_dir = ""
+        if self.parent_dialog:
+            # 调用父对话框的辅助方法来获取路径
+            _, textgrids_dir = self.parent_dialog._get_or_create_analysis_dirs()
+            if textgrids_dir and os.path.isdir(textgrids_dir):
+                default_dir = textgrids_dir
+        
+        # 2. 将获取到的目录作为第三个参数传入文件对话框
+        path, _ = QFileDialog.getOpenFileName(self, "选择 TextGrid 文件", default_dir, "TextGrid 文件 (*.TextGrid)")
+        # --- [核心修改结束] ---
+
         if not path: return
         try:
             self.tg = textgrid.TextGrid.fromFile(path)
@@ -410,21 +464,17 @@ class LayerConfigDialog(QDialog):
             self.config['tg_filename'] = os.path.basename(path)
             self.config['original_tg_path'] = path
 
-            # --- [核心修改开始] ---
             self.tg_tier_combo.clear()
-            # 1. 查找所有 IntervalTier 并填充下拉框
             interval_tiers = [tier.name for tier in self.tg if isinstance(tier, textgrid.IntervalTier)]
             if interval_tiers:
                 self.tg_tier_combo.addItems(interval_tiers)
                 self.tg_tier_label.show()
                 self.tg_tier_combo.show()
-                # 2. 默认应用第一个找到的层
                 self._apply_selected_tier_to_df() 
             else:
                 QMessageBox.warning(self, "未找到有效的层", "此 TextGrid 文件中不包含任何 IntervalTier。")
                 self.tg_tier_label.hide()
                 self.tg_tier_combo.hide()
-            # --- [核心修改结束] ---
 
             self.load_audio_btn.setEnabled(True) 
         except Exception as e:
@@ -508,8 +558,8 @@ class LayerConfigDialog(QDialog):
 
     def get_layer_config(self):
         """
-        [v11.2 - 最终修复版, 与plotter对齐]
         从UI控件收集信息，并与已有的数据引用合并成最终配置。
+        [已修改] 增加了在确认时自动重命名 info.txt 的逻辑。
         """
         if self.df is None:
             QMessageBox.warning(self, "输入无效", "请先加载数据文件。")
@@ -520,34 +570,57 @@ class LayerConfigDialog(QDialog):
             QMessageBox.warning(self, "输入无效", "请输入图层名称。")
             return None
         
-        # 1. 基础数据（不应被UI直接修改的大对象）
-        # 从 self.config 获取 audio_data 确保了引用被正确传递
+        # --- [核心修改开始] 自动重命名 info.txt 的逻辑 ---
+        final_data_filename = self.data_file_label.text()
+        # 检查是否加载了文件，且文件名是 info.txt
+        if self.original_filepath and os.path.basename(self.original_filepath).lower() == 'info.txt':
+            dir_path = os.path.dirname(self.original_filepath)
+            new_filename = f"{name}.txt"
+            new_filepath = os.path.join(dir_path, new_filename)
+
+            # 检查目标文件是否已存在 (除了它自己)
+            if os.path.exists(new_filepath) and new_filepath != self.original_filepath:
+                 reply = QMessageBox.question(self, 
+                                              "文件已存在", 
+                                              f"文件 '{new_filename}' 已存在于同一目录下。是否要覆盖它？", 
+                                              QMessageBox.Yes | QMessageBox.No, 
+                                              QMessageBox.No)
+                 if reply == QMessageBox.No:
+                     return None # 用户取消，中止操作
+
+            try:
+                # 执行重命名
+                os.rename(self.original_filepath, new_filepath)
+                # 更新配置中要保存的文件名
+                final_data_filename = new_filename
+                # 更新原始路径记录，以防用户再次打开配置
+                self.original_filepath = new_filepath
+            except Exception as e:
+                QMessageBox.critical(self, "重命名失败", f"无法将 info.txt 重命名为 '{new_filename}':\n{e}")
+                return None # 重命名失败，中止操作
+        # --- [核心修改结束] ---
+
         final_config = {
             'df': self.df,
             'tg': self.tg,
             'audio_data': self.config.get('audio_data') 
         }
 
-        # 2. 从UI控件收集的配置
         ui_config = {
             "name": name,
-            "data_filename": self.data_file_label.text(),
+            "data_filename": final_data_filename, # [修改] 使用可能已更新的文件名
             "tg_filename": self.tg_file_label.text(),
-            "tg_tier": self.tg_tier_combo.currentText(), # [新增] 保存当前选择的Tier名称
+            "tg_tier": self.tg_tier_combo.currentText(),
             "audio_path": self.config.get('audio_path'),
             "time_col": self.time_combo.currentText(),
             "f0_col": self.f0_combo.currentText(),
             "group_col": self.group_by_combo.currentText(),
         }
 
-        # 3. 合并配置
-        # 先继承 self.config 中的所有其他可能存在的键
-        # 再用 ui_config 和 final_config 覆盖，确保是最新的值
         merged_config = self.config.copy()
         merged_config.update(final_config)
         merged_config.update(ui_config)
         
-        # 移除 player 键，确保它永远不会被传出去
         merged_config.pop('player', None)
         
         return merged_config
@@ -571,7 +644,7 @@ class VisualizerDialog(QDialog):
     }
     
     # 支持拖拽的文件类型 (增加了 .TextGrid)
-    SUPPORTED_EXTENSIONS = ('.csv', '.xlsx', '.xls', '.TextGrid') 
+    SUPPORTED_EXTENSIONS = ('.csv', '.xlsx', '.xls', '.TextGrid', '.txt') # [修改]
     PLUGIN_LAYER_TYPE = "intonation"
     def __init__(self, parent=None, icon_manager=None):
         """
@@ -2904,10 +2977,11 @@ class VisualizerDialog(QDialog):
         """
         核心的文件加载和添加逻辑，可被多处调用 (拖拽、文件对话框、外部插件)。
         自动判断文件类型是数据文件还是 TextGrid。
+        [已修复] 使用 delim_whitespace=True 来正确解析 Praat 的空格分隔文件。
         """
         try:
             if file_path.lower().endswith(('.xlsx', '.xls', '.csv')):
-                # 加载数据文件，并打开配置对话框
+                # 加载标准表格文件，并打开配置对话框
                 df = pd.read_excel(file_path) if file_path.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(file_path)
                 
                 # 为新图层创建默认配置，并传入加载的 df 和文件名
@@ -2939,8 +3013,62 @@ class VisualizerDialog(QDialog):
                         self._update_all_group_settings()
                         self._update_plot()
 
+            # [核心修复] 为 Praat 的 .txt 文件添加专门的转换和清理逻辑
+            elif file_path.lower().endswith('.txt'):
+                # 1. [关键修改] 使用 delim_whitespace=True，并将 '--undefined--' 识别为 NaN
+                df = pd.read_csv(file_path, delim_whitespace=True, na_values='--undefined--')
+
+                # 2. 找到 F0 列并移除所有 NaN 行
+                f0_col_praat = next((c for c in df.columns if 'f0' in c.lower() or 'frequency' in c.lower()), None)
+                if f0_col_praat:
+                    df.dropna(subset=[f0_col_praat], inplace=True)
+                
+                # 3. 重命名列以匹配插件内部标准
+                rename_mapping = {}
+                for col in df.columns:
+                    if 'time' in col.lower():
+                        rename_mapping[col] = 'timestamp'
+                    elif 'f0' in col.lower() or 'frequency' in col.lower():
+                        rename_mapping[col] = 'f0_hz'
+                df.rename(columns=rename_mapping, inplace=True)
+                
+                # 4. 重置索引，使之连续
+                df.reset_index(drop=True, inplace=True)
+
+                # 检查转换是否成功
+                if 'timestamp' not in df.columns or 'f0_hz' not in df.columns:
+                    QMessageBox.warning(self, "列名不匹配", "无法在文件中找到标准的时间和F0列。\n请确保列名包含 'Time' 和 'F0' 或 'Frequency'。")
+                    return
+                
+                # 创建新图层配置，现在 df 已经是干净的了
+                new_config = {
+                    "df": df,
+                    "data_filename": os.path.basename(file_path),
+                    "name": os.path.splitext(os.path.basename(file_path))[0],
+                    "time_col": "timestamp", # 使用标准列名
+                    "f0_col": "f0_hz",       # 使用标准列名
+                    "group_col": "无分组",
+                    "enabled": True,
+                    "tg": None,
+                    "tg_filename": "未选择 (可选)",
+                    "smoothing_enabled": True, "smoothing_window": 4,
+                    "show_points": False, "point_size": 10, "point_alpha": 0.4
+                }
+
+                # 弹出配置对话框让用户确认
+                dialog = LayerConfigDialog(existing_config=new_config, parent=self)
+                if dialog.exec_() == QDialog.Accepted:
+                    final_config = dialog.get_layer_config()
+                    if final_config:
+                        self.layers.append(final_config)
+                        self._update_layer_table()
+                        self._update_ui_state()
+                        self._update_all_group_settings()
+                        self._update_plot()
+            # [核心修复结束]
+
             elif file_path.lower().endswith('.textgrid'):
-                # 如果是 TextGrid 文件，尝试与当前选中的图层关联
+                # ... (此部分代码保持不变) ...
                 current_row = self.layer_table.currentRow()
                 if current_row == -1:
                     QMessageBox.warning(self, "未选择图层", "请先在左侧列表中选择一个数据图层，再拖入 TextGrid 文件。")
@@ -2959,16 +3087,14 @@ class VisualizerDialog(QDialog):
                     layer_config['tg'] = tg
                     layer_config['tg_filename'] = os.path.basename(file_path)
                     
-                    # 临时创建一个 LayerConfigDialog 来应用 TextGrid 并更新配置
                     temp_dialog = LayerConfigDialog(existing_config=layer_config, parent=self)
-                    temp_dialog._apply_textgrid() # 强制应用 TextGrid
-                    # 重新获取更新后的配置，并覆盖原图层配置
+                    temp_dialog._apply_textgrid()
                     updated_config = temp_dialog.get_layer_config()
                     if updated_config:
                         self.layers[current_row] = updated_config
-                        self._update_layer_table_row(current_row) # 刷新表格行
-                        self._update_all_group_settings() # 刷新全局分组
-                        self._update_plot() # 重绘
+                        self._update_layer_table_row(current_row)
+                        self._update_all_group_settings()
+                        self._update_plot()
                         QMessageBox.information(self, "TextGrid 已应用", f"TextGrid '{os.path.basename(file_path)}' 已成功应用于图层 '{layer_config['name']}'。")
                 except Exception as e:
                     QMessageBox.critical(self, "TextGrid 错误", f"无法加载或应用 TextGrid 文件: {e}")
